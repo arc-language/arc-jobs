@@ -1,0 +1,43 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe the problem you're trying to solve.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem does this feature solve? What use case does it enable?
+      placeholder: "I often need to… and currently there's no way to…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature you'd like, including any proposed API or syntax.
+      render: arc
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What alternatives did you consider? Why don't they work for your use case?
+
+  - type: dropdown
+    id: willing
+    attributes:
+      label: Willing to implement?
+      options:
+        - "Yes — I'd like to open a PR"
+        - "Maybe — if someone can guide me"
+        - "No — just suggesting"
+    validations:
+      required: true

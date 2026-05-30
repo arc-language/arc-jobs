@@ -1,7 +1,7 @@
 {
-  "name": "arc-jobs",
+  "name": "@arc-lang/arc-jobs",
   "version": "0.1.0",
-  "description": "Production job queues for Arc — SQLite, Redis, and SQS adapters with scheduling, deduplication, and progress tracking",
+  "description": "Production background jobs for Arc — SQLite, Redis, and memory adapters with scheduling, deduplication (@unique), progress tracking (@progress), and an admin dashboard",
   "main": "src/index.js",
   "types": "src/types/index.d.ts",
   "bin": {
@@ -18,7 +18,8 @@
     "src/",
     "bin/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "bun test tests/",
@@ -27,25 +28,33 @@
   },
   "keywords": [
     "arc",
+    "arc-lang",
+    "arc-language",
     "jobs",
     "queue",
-    "celery",
     "background-jobs",
     "job-queue",
+    "task-queue",
+    "celery",
+    "bullmq",
     "sqlite",
     "redis",
     "bun",
-    "task-queue",
     "cron",
-    "scheduler"
+    "scheduler",
+    "deduplication",
+    "progress",
+    "dashboard"
   ],
+  "author": "Arc Contributors",
+  "funding": "https://github.com/sponsors/arc-language",
   "repository": {
     "type": "git",
-    "url": "https://github.com/arc-lang/arc-jobs.git"
+    "url": "https://github.com/arc-language/arc-jobs.git"
   },
-  "homepage": "https://arc-lang.com/docs/jobs",
+  "homepage": "https://arc-language.dev/docs/jobs",
   "bugs": {
-    "url": "https://github.com/arc-lang/arc-jobs/issues"
+    "url": "https://github.com/arc-language/arc-jobs/issues"
   },
   "license": "MIT",
   "engines": {

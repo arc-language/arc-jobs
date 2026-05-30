@@ -1,43 +1,49 @@
-# arc-jobs
+# @arc-lang/arc-jobs
 
-Production background jobs for [Arc](https://arc-lang.com) — SQLite, Redis, and SQS adapters with scheduling, deduplication, and progress tracking.
+[![npm](https://img.shields.io/npm/v/@arc-lang/arc-jobs?color=6366f1&label=npm)](https://www.npmjs.com/package/@arc-lang/arc-jobs)
+[![CI](https://github.com/arc-language/arc-jobs/actions/workflows/test.yml/badge.svg)](https://github.com/arc-language/arc-jobs/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
+[![Bun compatible](https://img.shields.io/badge/bun-%E2%89%A51.0-f6dece.svg)](https://bun.sh)
 
-**Better than Django Celery because:**
-- Zero external broker for development — SQLite queue runs in-process
-- Compile-time type-safe — wrong job signatures fail at `arc build`, not in production
-- No separate worker process — jobs run inside your server
-- `@unique` prevents duplicate jobs (celery-once built-in)
-- `@schedule` replaces Celery Beat without a second process
+Production background jobs for [Arc](https://arc-language.dev) — SQLite, Redis, and memory adapters with cron scheduling, deduplication, progress tracking, and a live admin dashboard.
 
-```arc
-@queue payments
-@priority high
-@unique strategy=skip
-job ProcessPayment(orderId: Int, amount: Float)
-  const order = db.orders.find(orderId)
-  stripe.charge(order.userId, amount)
+---
 
-@schedule "0 9 * * *"
-job DailyDigest()
-  const users = db.users.findMany({ active: true })
-  for user in users
-    email.send({ to: user.email, subject: "Your digest" })
+## Why arc-jobs?
 
-@progress
-job ImportCSV(fileId: Int)
-  const rows = db.uploads.find(fileId)
-  for i, row in rows
-    job.progress(i / rows.length * 100)
-    processRow(row)
-```
+- **Zero broker in development** — SQLite queue runs in-process; no Redis to set up locally
+- **Compile-time type safety** — wrong job signatures fail at `arc build`, not in production
+- **No separate worker process** — jobs run inside your server, one fewer thing to deploy
+- **`@unique` deduplication** — prevents duplicate jobs while one is already pending or running (celery-once built-in)
+- **`@schedule` cron** — replaces a separate Celery Beat / BullMQ scheduler process
+
+---
+
+## Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Annotations Reference](#annotations-reference)
+- [Calling Jobs](#calling-jobs)
+- [Queue Adapters](#queue-adapters)
+- [Comparison](#comparison)
+- [Arc Ecosystem](#arc-ecosystem)
+- [Admin Dashboard](#admin-dashboard)
+- [CLI](#cli)
+- [Testing](#testing)
+- [Cloudflare Workers](#cloudflare-workers)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Install
 
 ```bash
-bun add arc-jobs
+bun add @arc-lang/arc-jobs
 ```
 
-Then add queue configuration to `arc.config.json`:
+Add queue configuration to `arc.config.json`:
 
 ```json
 {
@@ -54,6 +60,8 @@ Or run the interactive setup:
 ```bash
 arc-jobs init
 ```
+
+---
 
 ## Quick Start
 
@@ -91,8 +99,8 @@ job WeeklyReport()
 ```arc
 @route post "/orders" -> Response
   const order = db.orders.create(parseBody(request))
-  ProcessPayment(order.id, order.total)   // fire-and-forget
-  SendWelcomeEmail.delay(86400000, order.userId)  // delayed 24h
+  ProcessPayment(order.id, order.total)            // fire-and-forget
+  SendWelcomeEmail.delay(86400000, order.userId)   // delayed 24h
   json(order, 201)
 ```
 
@@ -103,11 +111,11 @@ arc build-server .
 bun dist/server.js
 ```
 
-That's it. No broker to set up. Jobs run inside your server process.
+No broker to set up. Jobs run inside your server process.
 
 ---
 
-## Job Annotations Reference
+## Annotations Reference
 
 ### `@queue <name>`
 
@@ -278,12 +286,10 @@ Best for: high-volume apps, multi-worker deployments, horizontal scaling.
 
 - **100,000+ ops/sec**
 - Priority queues via sorted sets
-- `@unique` locks via atomic `SET NX PX` (exact celery-once behavior)
+- `@unique` locks via atomic `SET NX PX`
 - Requires `Bun.Redis` (built-in) or `ioredis` (`bun add ioredis` for Node.js)
 
 ### Mixed (recommended for production)
-
-Use SQLite for non-urgent work, Redis for time-critical paths:
 
 ```json
 {
@@ -294,6 +300,63 @@ Use SQLite for non-urgent work, Redis for time-critical paths:
   }
 }
 ```
+
+---
+
+## Comparison
+
+### vs BullMQ & pg-boss
+
+| | arc-jobs (SQLite) | arc-jobs (Redis) | BullMQ | pg-boss |
+|---|---|---|---|---|
+| **Backend** | SQLite (in app.db) | Redis | Redis | PostgreSQL |
+| **Setup** | Zero | `bun add ioredis` | Redis required | Postgres required |
+| **Worker process** | In-process | In-process | Separate or in-process | In-process |
+| **Type safety** | Compile-time (Arc) | Compile-time (Arc) | Runtime | Runtime |
+| **Deduplication** | `@unique` built-in | `@unique` built-in | `jobId` option | `singletonKey` |
+| **Cron scheduler** | In-process | In-process | Separate or in-process | Built-in |
+| **Progress tracking** | `@progress` + SSE | `@progress` + SSE | `job.updateProgress()` | None |
+| **Admin dashboard** | `/_arc/jobs` built-in | `/_arc/jobs` built-in | Bull Board (extra pkg) | pgboss-web |
+| **Throughput** | ~15k jobs/min | ~100k+ ops/sec | ~100k+ ops/sec | ~5k jobs/sec |
+
+### vs Django Celery
+
+| | arc-jobs (SQLite) | arc-jobs (Redis) | Django Celery |
+|---|---|---|---|
+| **Enqueue latency** | ~0.1ms | ~0.5ms | ~1–5ms (network hop) |
+| **Throughput** | ~15k jobs/sec | ~100k jobs/sec | Millions/min (distributed) |
+| **Setup** | Zero | `bun add ioredis` | Redis + worker process + Celery Beat |
+| **Worker process** | In-process | In-process | Separate `celery worker` |
+| **Scheduler** | In-process | In-process | Separate `celery beat` |
+| **Type safety** | Compile-time | Compile-time | Runtime (stringly-typed) |
+| **`@unique`** | Built-in | Built-in | Requires celery-once |
+| **Test mode** | Synchronous flush | Synchronous flush | Needs mock broker |
+
+Arc jobs on Bun outperform Python Celery for I/O-bound work (webhooks, email, API calls) — the common 80% case. Celery wins for CPU-bound tasks (ML, image processing) that benefit from multi-process parallelism.
+
+---
+
+## Arc Ecosystem
+
+arc-jobs is a first-class part of the [Arc](https://arc-language.dev) web framework. Jobs are a built-in language construct — not a library bolted on.
+
+```
+Arc ecosystem
+├── arc           compiler & language core    arc-language.dev
+├── arc-cms       admin panel + headless CMS  github.com/arc-language/arc-cms
+└── arc-jobs      background job queues       github.com/arc-language/arc-jobs
+```
+
+**How jobs fit into Arc's data contexts:**
+
+| Context | When to use |
+|---------|-------------|
+| `@state` | Instant client-side updates — no server needed |
+| `@live` | Edge-rendered HTML, one server round trip |
+| `@realtime` | WebSocket/SSE for live collaborative features |
+| **`job`** | **Background work: email, payments, imports, reports** |
+
+Jobs are triggered from `@route` handlers and run asynchronously inside your server. Progress from `@progress` jobs streams to `@live` pages via SSE.
 
 ---
 
@@ -327,6 +390,9 @@ arc-jobs replay --db path/to/app.db
 # Real-time terminal monitor (refreshes every 2s)
 arc-jobs monitor
 arc-jobs monitor --db path/to/app.db
+
+# Version
+arc-jobs --version
 ```
 
 ---
@@ -381,23 +447,6 @@ Build a test-mode server with `NODE_ENV=test arc build-server .`.
 
 ---
 
-## Performance vs Django Celery
-
-| | arc-jobs (SQLite) | arc-jobs (Redis) | Django Celery |
-|---|---|---|---|
-| **Enqueue latency** | ~0.1ms (local write) | ~0.5ms (local Redis) | ~1-5ms (network hop) |
-| **Throughput** | ~15k jobs/sec | ~100k jobs/sec | Millions/min (distributed) |
-| **Setup** | Zero — uses app.db | `bun add ioredis` | Redis + worker process + Celery Beat |
-| **Worker process** | In-process | In-process | Separate `celery worker` |
-| **Scheduler** | In-process setInterval | In-process setInterval | Separate `celery beat` |
-| **Type safety** | Compile-time | Compile-time | Runtime (stringly-typed) |
-| **`@unique`** | Built-in | Built-in | Requires celery-once |
-| **Test mode** | Synchronous flush | Synchronous flush | Needs mock broker |
-
-Arc jobs on Bun outperform Python Celery for I/O-bound work (webhooks, email, API calls) — the common 80% case. Celery wins for CPU-bound tasks (ML, image processing) that benefit from multi-process parallelism.
-
----
-
 ## Cloudflare Workers
 
 On the Cloudflare target, arc-jobs maps to native CF primitives:
@@ -413,24 +462,16 @@ No configuration needed — `arc build --target cloudflare` handles it automatic
 
 ---
 
-## GitHub Actions CI
+## Contributing
 
-```yaml
-# .github/workflows/test.yml
-name: Test
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun test packages/arc-jobs/tests/
-```
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, branch naming, and the PR checklist.
+
+To report a security vulnerability privately, see [SECURITY.md](SECURITY.md).
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+Part of the [Arc](https://arc-language.dev) ecosystem.
