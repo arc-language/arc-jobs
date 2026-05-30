@@ -1,0 +1,250 @@
+'use strict'
+
+const { test, describe, beforeEach } = require('bun:test')
+const assert = require('assert')
+const { MemoryAdapter } = require('../src/adapters/memory')
+const { createQueue } = require('../src/core/queue')
+const { arcJobsHandle, broadcastProgress } = require('../src/dashboard/handler')
+
+function makeQueue(name = 'default') {
+  process.env.NODE_ENV = 'test'
+  const adapter = new MemoryAdapter({ name })
+  const q = createQueue(adapter)
+  return { q, adapter }
+}
+
+function makeRequest(method, path, body) {
+  const url = 'http://localhost' + path
+  const opts = { method }
+  if (body) {
+    opts.body = JSON.stringify(body)
+    opts.headers = { 'Content-Type': 'application/json' }
+  }
+  return new Request(url, opts)
+}
+
+describe('arcJobsHandle()', () => {
+  let queues, q, adapter
+
+  beforeEach(() => {
+    const setup = makeQueue('default')
+    q = setup.q
+    adapter = setup.adapter
+    queues = { default: q }
+  })
+
+  test('returns null for non-matching paths', async () => {
+    const res = await arcJobsHandle(makeRequest('GET', '/api/other'), queues)
+    assert.strictEqual(res, null)
+  })
+
+  test('serves dashboard HTML at /_arc/jobs', async () => {
+    const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs'), queues)
+    assert.ok(res instanceof Response)
+    assert.strictEqual(res.status, 200)
+    assert.ok(res.headers.get('Content-Type').includes('text/html'))
+    const body = await res.text()
+    assert.ok(body.includes('arc-jobs'))
+    assert.ok(body.includes('<!DOCTYPE html>'))
+  })
+
+  test('serves dashboard HTML at /_arc/jobs/', async () => {
+    const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/'), queues)
+    assert.ok(res instanceof Response)
+    assert.strictEqual(res.status, 200)
+  })
+
+  test('returns 404 for unknown sub-path', async () => {
+    const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/nonexistent'), queues)
+    assert.strictEqual(res.status, 404)
+  })
+
+  describe('/api/overview', () => {
+    test('returns queue names and zero counts when empty', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/overview'), queues)
+      assert.strictEqual(res.status, 200)
+      const data = await res.json()
+      assert.ok(Array.isArray(data.queues))
+      assert.strictEqual(data.queues[0].name, 'default')
+      assert.strictEqual(data.queues[0].pending, 0)
+    })
+
+    test('reflects enqueued job in pending count', async () => {
+      await adapter.enqueue('TestJob', [1])
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/overview'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.queues[0].pending, 1)
+    })
+
+    test('multiple queues all listed', async () => {
+      const { q: q2 } = makeQueue('payments')
+      const multiQueues = { default: q, payments: q2 }
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/overview'), multiQueues)
+      const data = await res.json()
+      const names = data.queues.map(q => q.name)
+      assert.ok(names.includes('default'))
+      assert.ok(names.includes('payments'))
+    })
+  })
+
+  describe('/api/jobs', () => {
+    test('returns empty jobs list when queue is empty', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs?queue=default'), queues)
+      const data = await res.json()
+      assert.deepStrictEqual(data.jobs, [])
+    })
+
+    test('returns pending jobs', async () => {
+      await adapter.enqueue('MyJob', [42, 'hello'])
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs?queue=default'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.jobs.length, 1)
+      assert.strictEqual(data.jobs[0].name, 'MyJob')
+      assert.deepStrictEqual(data.jobs[0].args, [42, 'hello'])
+    })
+
+    test('returns empty array for unknown queue', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs?queue=unknown'), queues)
+      const data = await res.json()
+      assert.deepStrictEqual(data.jobs, [])
+    })
+  })
+
+  describe('/api/jobs/:id/cancel', () => {
+    test('cancels a pending job', async () => {
+      const id = await adapter.enqueue('CancelMe', [])
+      assert.strictEqual(adapter._pending.length, 1)
+
+      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/jobs/' + id + '/cancel'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.ok, true)
+      assert.strictEqual(adapter._pending.length, 0)
+    })
+
+    test('cancel returns ok even for unknown id', async () => {
+      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/jobs/no-such-id/cancel'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.ok, true)
+    })
+  })
+
+  describe('/api/dlq', () => {
+    test('returns empty array when no dead jobs', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/dlq?queue=default'), queues)
+      const data = await res.json()
+      assert.deepStrictEqual(data.jobs, [])
+    })
+
+    test('returns dead jobs', async () => {
+      // Manually push to dead queue to simulate failed job
+      adapter._dead.push({ id: 'dead-1', name: 'FailedJob', args: [99], error: 'boom', failedAt: new Date().toISOString() })
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/dlq?queue=default'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.jobs.length, 1)
+      assert.strictEqual(data.jobs[0].name, 'FailedJob')
+    })
+  })
+
+  describe('/api/dlq/replay (all)', () => {
+    test('replays all dead jobs', async () => {
+      q.register('FailedJob', async () => {})
+      adapter._dead.push({ id: 'dead-1', name: 'FailedJob', args: [] })
+      adapter._dead.push({ id: 'dead-2', name: 'FailedJob', args: [] })
+
+      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/dlq/replay?queue=default'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.replayed, 2)
+      assert.strictEqual(adapter._pending.length, 2)
+    })
+  })
+
+  describe('/api/dlq/:id/replay', () => {
+    test('replays a single dead job by id', async () => {
+      q.register('OneJob', async () => {})
+      adapter._dead.push({ id: 'dead-one', name: 'OneJob', args: [5] })
+
+      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/dlq/dead-one/replay'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.ok, true)
+      assert.strictEqual(adapter._pending.length, 1)
+      assert.strictEqual(adapter._pending[0].name, 'OneJob')
+    })
+  })
+
+  describe('/api/locks', () => {
+    test('returns empty locks when none active', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/locks'), queues)
+      const data = await res.json()
+      assert.deepStrictEqual(data.locks, [])
+    })
+
+    test('returns active locks', async () => {
+      await adapter.acquireLock('invoice:42', 60000)
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/locks'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.locks.length, 1)
+      assert.strictEqual(data.locks[0].key, 'invoice:42')
+      assert.ok(data.locks[0].expiresAt > Date.now())
+    })
+
+    test('does not return expired locks', async () => {
+      adapter._locks.set('old-lock', Date.now() - 1000)  // already expired
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/locks'), queues)
+      const data = await res.json()
+      assert.deepStrictEqual(data.locks, [])
+    })
+  })
+
+  describe('/api/locks/:key DELETE', () => {
+    test('releases an active lock', async () => {
+      await adapter.acquireLock('my-lock', 60000)
+      assert.ok(adapter._locks.has('my-lock'))
+
+      const res = await arcJobsHandle(makeRequest('DELETE', '/_arc/jobs/api/locks/my-lock'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.ok, true)
+      assert.ok(!adapter._locks.has('my-lock'))
+    })
+
+    test('URL-encoded lock keys are decoded', async () => {
+      await adapter.acquireLock('job:42:step', 60000)
+      const res = await arcJobsHandle(makeRequest('DELETE', '/_arc/jobs/api/locks/job%3A42%3Astep'), queues)
+      const data = await res.json()
+      assert.strictEqual(data.ok, true)
+    })
+  })
+
+  describe('/api/schedules', () => {
+    test('returns empty list when no schedules', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/schedules'), queues, [])
+      const data = await res.json()
+      assert.deepStrictEqual(data.schedules, [])
+    })
+
+    test('returns schedule info with next fire time', async () => {
+      const schedules = [{ job: 'DailyDigest', cron: '0 9 * * *', queue: 'default' }]
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/schedules'), queues, schedules)
+      const data = await res.json()
+      assert.strictEqual(data.schedules.length, 1)
+      assert.strictEqual(data.schedules[0].job, 'DailyDigest')
+      assert.strictEqual(data.schedules[0].cron, '0 9 * * *')
+      assert.ok(data.schedules[0].next)
+    })
+  })
+
+  describe('broadcastProgress()', () => {
+    test('is exported and callable', () => {
+      assert.strictEqual(typeof broadcastProgress, 'function')
+      // No SSE listeners attached — should not throw
+      assert.doesNotThrow(() => broadcastProgress('job-1', 42, { processed: 5 }))
+    })
+  })
+
+  describe('/events SSE endpoint', () => {
+    test('returns SSE response with correct headers', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/events'), queues)
+      assert.ok(res instanceof Response)
+      assert.ok(res.headers.get('Content-Type').includes('text/event-stream'))
+    })
+  })
+})

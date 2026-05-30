@@ -1,0 +1,67 @@
+{
+  "name": "arc-jobs",
+  "version": "0.1.0",
+  "description": "Production job queues for Arc — SQLite, Redis, and SQS adapters with scheduling, deduplication, and progress tracking",
+  "main": "src/index.js",
+  "types": "src/types/index.d.ts",
+  "bin": {
+    "arc-jobs": "./bin/arc-jobs.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./adapters/memory": "./src/adapters/memory.js",
+    "./adapters/sqlite": "./src/adapters/sqlite.js",
+    "./adapters/redis": "./src/adapters/redis.js",
+    "./dashboard": "./src/dashboard/handler.js"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "bun test tests/",
+    "test:watch": "bun test --watch tests/",
+    "test:coverage": "bun test --coverage tests/"
+  },
+  "keywords": [
+    "arc",
+    "jobs",
+    "queue",
+    "celery",
+    "background-jobs",
+    "job-queue",
+    "sqlite",
+    "redis",
+    "bun",
+    "task-queue",
+    "cron",
+    "scheduler"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arc-lang/arc-jobs.git"
+  },
+  "homepage": "https://arc-lang.com/docs/jobs",
+  "bugs": {
+    "url": "https://github.com/arc-lang/arc-jobs/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "bun": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "bun": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "ioredis": ">=5.0.0",
+    "better-sqlite3": ">=9.0.0"
+  }
+}
