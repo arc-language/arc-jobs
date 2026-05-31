@@ -478,6 +478,116 @@ let _startupWarnedUnprotected = false
  *   In Arc apps, pass `async (req) => { const s = await auth.session(req); return s?.role === 'admin' || s?.role === 'superuser' }`.
  *   Falls back to ARC_JOBS_SECRET env var token check if omitted.
  */
+// ── Route handlers ────────────────────────────────────────────────────────────
+
+function _routeDashboard() {
+  return new Response(_DASHBOARD_HTML, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+  })
+}
+
+function _routeEvents(queues) {
+  _ensureSharedBroadcast(queues)
+  let _sseCtrl
+  const stream = new ReadableStream({
+    start(controller) {
+      _sseCtrl = controller
+      _sseClients.add(controller)
+      _collectStats(queues).then(stats => {
+        const firstQueueStats = Object.values(stats)[0] ?? {}
+        try { controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...firstQueueStats })}\n\n`) } catch (_) {}
+      }).catch(() => {})
+    },
+    cancel() { _sseClients.delete(_sseCtrl) },
+  })
+  return new Response(stream, {
+    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
+  })
+}
+
+function _routeProgress(jobId) {
+  let _ctrl
+  const stream = new ReadableStream({
+    start(controller) {
+      _ctrl = controller
+      let set = _progressListeners.get(jobId)
+      if (!set) { set = new Set(); _progressListeners.set(jobId, set) }
+      set.add(controller)
+    },
+    cancel() {
+      const set = _progressListeners.get(jobId)
+      if (set && _ctrl) {
+        set.delete(_ctrl)
+        if (set.size === 0) _progressListeners.delete(jobId)
+      }
+    },
+  })
+  return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
+}
+
+async function _routeOverview(queues) {
+  const stats = await _collectStats(queues)
+  return _json({ queues: Object.entries(stats).map(([name, s]) => ({ name, ...s })) })
+}
+
+function _routeSchedules(schedules) {
+  return _json({ schedules: schedules.map(s => ({
+    job: s.job, cron: s.cron, queue: s.queue ?? 'default', next: _fmtNext(nextFireTime(s.cron)),
+  })) })
+}
+
+async function _routeLocks(queues) {
+  return _json({ locks: await _collectLocks(queues) })
+}
+
+async function _routeJobs(url, queues) {
+  const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
+  const adapter = queues[qName]?._adapter
+  if (!adapter) return _json({ jobs: [] })
+  return _json({ jobs: await _listActiveJobs(adapter) })
+}
+
+async function _routeCancelJob(id, queues) {
+  for (const q of Object.values(queues)) {
+    try { await q.cancel(id) } catch (e) {
+      console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', event: 'cancel_error', id, error: e?.message ?? String(e) }))
+    }
+  }
+  return _json({ ok: true })
+}
+
+async function _routeDlq(url, queues) {
+  const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
+  const adapter = queues[qName]?._adapter
+  return _json({ jobs: adapter ? await adapter.dead() : [] })
+}
+
+async function _routeReplayDeadAll(url, queues) {
+  const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
+  const q = queues[qName]
+  return _json({ replayed: q ? await q.replayDead() : 0 })
+}
+
+async function _routeReplayOne(id, queues) {
+  let found = false
+  for (const q of Object.values(queues)) {
+    try { if (await q._adapter.replayOne(id)) { found = true; break } } catch (e) {
+      console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', event: 'replay_one_error', id, error: e?.message ?? String(e) }))
+    }
+  }
+  if (!found) return _json({ error: 'Job not found in dead letter queue' }, 404)
+  return _json({ ok: true })
+}
+
+async function _routeDeleteLock(key, queues) {
+  for (const q of Object.values(queues)) {
+    try { await q.releaseLock(key) } catch (e) {
+      console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', event: 'release_lock_error', key, error: e?.message ?? String(e) }))
+    }
+  }
+  return _json({ ok: true })
+}
+
 async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   if (!_startupWarnedUnprotected && !opts.auth && !process.env.ARC_JOBS_SECRET) {
     _startupWarnedUnprotected = true
@@ -485,152 +595,41 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   }
 
   const url = new URL(req.url)
-  const path = url.pathname
+  if (!url.pathname.startsWith('/_arc/jobs')) return null
 
-  if (!path.startsWith('/_arc/jobs')) return null
-
-  const sub = path.slice('/_arc/jobs'.length) || '/'
+  const sub = url.pathname.slice('/_arc/jobs'.length) || '/'
   const method = req.method.toUpperCase()
 
-  // ── Auth check (skip for SSE progress — job owner polls their own job) ──
   if (!sub.match(/^\/api\/jobs\/[^/]+\/progress$/)) {
     const ok = await _checkAuth(req, opts.auth)
     if (!ok) {
-      if (sub === '/' || sub === '') {
-        return new Response(_401_HTML, { status: 401, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
-      }
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } })
+      return sub === '/' || sub === ''
+        ? new Response(_401_HTML, { status: 401, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+        : new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } })
     }
   }
 
-  // ── Dashboard HTML ──
-  if (sub === '/' || sub === '') {
-    return new Response(_DASHBOARD_HTML, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
-    })
-  }
+  if (sub === '/' || sub === '')                    return _routeDashboard()
+  if (sub === '/events')                            return _routeEvents(queues)
+  if (sub === '/api/overview')                      return _routeOverview(queues)
+  if (sub === '/api/schedules')                     return _routeSchedules(schedules)
+  if (sub === '/api/locks')                         return _routeLocks(queues)
 
-  // ── SSE stream (all queues, ~2s tick) ──
-  if (sub === '/events') {
-    _ensureSharedBroadcast(queues)
-    let _sseCtrl
-    const stream = new ReadableStream({
-      start(controller) {
-        _sseCtrl = controller
-        _sseClients.add(controller)
-        // Send initial tick immediately on connect
-        _collectStats(queues).then(stats => {
-          const firstQueueStats = Object.values(stats)[0] ?? {}
-          try { controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...firstQueueStats })}\n\n`) } catch (_) {}
-        }).catch(() => {})
-      },
-      cancel() { _sseClients.delete(_sseCtrl) },
-    })
-    return new Response(stream, {
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
-    })
-  }
+  const progMatch      = sub.match(/^\/api\/jobs\/([^/]+)\/progress$/)
+  const jobsMatch      = sub.match(/^\/api\/jobs(\?.*)?$/)
+  const cancelMatch    = sub.match(/^\/api\/jobs\/([^/]+)\/cancel$/)
+  const dlqReplayAll   = sub.match(/^\/api\/dlq\/replay$/)
+  const dlqReplayOne   = sub.match(/^\/api\/dlq\/([^/]+)\/replay$/)
+  const dlqMatch       = sub.match(/^\/api\/dlq(\?.*)?$/)
+  const lockDelete     = sub.match(/^\/api\/locks\/(.+)$/)
 
-  // ── SSE progress for a single job ──
-  const progMatch = sub.match(/^\/api\/jobs\/([^/]+)\/progress$/)
-  if (progMatch && method === 'GET') {
-    const jobId = progMatch[1]
-    let _ctrl
-    const stream = new ReadableStream({
-      start(controller) {
-        _ctrl = controller
-        let set = _progressListeners.get(jobId)
-        if (!set) { set = new Set(); _progressListeners.set(jobId, set) }
-        set.add(controller)
-      },
-      cancel() {
-        const set = _progressListeners.get(jobId)
-        if (set && _ctrl) {
-          set.delete(_ctrl)
-          if (set.size === 0) _progressListeners.delete(jobId)
-        }
-      },
-    })
-    return new Response(stream, {
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-    })
-  }
-
-  // ── JSON API ──
-
-  if (sub === '/api/overview') {
-    const stats = await _collectStats(queues)
-    return _json({ queues: Object.entries(stats).map(([name, s]) => ({ name, ...s })) })
-  }
-
-  if (sub === '/api/schedules') {
-    const result = schedules.map(s => ({
-      job: s.job,
-      cron: s.cron,
-      queue: s.queue ?? 'default',
-      next: _fmtNext(nextFireTime(s.cron)),
-    }))
-    return _json({ schedules: result })
-  }
-
-  if (sub === '/api/locks') {
-    const locks = await _collectLocks(queues)
-    return _json({ locks })
-  }
-
-  const jobsMatch = sub.match(/^\/api\/jobs(\?.*)?$/)
-  if (jobsMatch && method === 'GET') {
-    const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
-    const adapter = queues[qName]?._adapter
-    if (!adapter) return _json({ jobs: [] })
-    const jobs = await _listActiveJobs(adapter)
-    return _json({ jobs })
-  }
-
-  const cancelMatch = sub.match(/^\/api\/jobs\/([^/]+)\/cancel$/)
-  if (cancelMatch && method === 'POST') {
-    const id = cancelMatch[1]
-    for (const q of Object.values(queues)) {
-      try { await q.cancel(id) } catch (_) {}
-    }
-    return _json({ ok: true })
-  }
-
-  const dlqMatch = sub.match(/^\/api\/dlq(\?.*)?$/)
-  if (dlqMatch && method === 'GET') {
-    const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
-    const adapter = queues[qName]?._adapter
-    const jobs = adapter ? await adapter.dead() : []
-    return _json({ jobs })
-  }
-
-  const dlqReplayAllMatch = sub.match(/^\/api\/dlq\/replay$/)
-  if (dlqReplayAllMatch && method === 'POST') {
-    const qName = url.searchParams.get('queue') ?? Object.keys(queues)[0]
-    const q = queues[qName]
-    const count = q ? await q.replayDead() : 0
-    return _json({ replayed: count })
-  }
-
-  const dlqReplayMatch = sub.match(/^\/api\/dlq\/([^/]+)\/replay$/)
-  if (dlqReplayMatch && method === 'POST') {
-    const id = dlqReplayMatch[1]
-    let found = false
-    for (const q of Object.values(queues)) {
-      try { if (await q._adapter.replayOne(id)) { found = true; break } } catch (_) {}
-    }
-    if (!found) return _json({ error: 'Job not found in dead letter queue' }, 404)
-    return _json({ ok: true })
-  }
-
-  const lockDeleteMatch = sub.match(/^\/api\/locks\/(.+)$/)
-  if (lockDeleteMatch && method === 'DELETE') {
-    const key = decodeURIComponent(lockDeleteMatch[1])
-    for (const q of Object.values(queues)) {
-      try { await q.releaseLock(key) } catch (_) {}
-    }
-    return _json({ ok: true })
-  }
+  if (progMatch    && method === 'GET')    return _routeProgress(progMatch[1])
+  if (jobsMatch    && method === 'GET')    return _routeJobs(url, queues)
+  if (cancelMatch  && method === 'POST')   return _routeCancelJob(cancelMatch[1], queues)
+  if (dlqReplayAll && method === 'POST')   return _routeReplayDeadAll(url, queues)
+  if (dlqReplayOne && method === 'POST')   return _routeReplayOne(dlqReplayOne[1], queues)
+  if (dlqMatch     && method === 'GET')    return _routeDlq(url, queues)
+  if (lockDelete   && method === 'DELETE') return _routeDeleteLock(decodeURIComponent(lockDelete[1]), queues)
 
   return new Response('Not found', { status: 404 })
 }
@@ -647,32 +646,8 @@ function _json(data, status = 200) {
 async function _collectStats(queues) {
   const stats = {}
   for (const [name, q] of Object.entries(queues)) {
-    const adapter = q._adapter
     try {
-      if (adapter._all) {
-        // _all is only present on SqliteAdapter
-        const rows = adapter._all(
-          `SELECT status, COUNT(*) as c FROM _arc_jobs WHERE queue=?1 GROUP BY status`,
-          name
-        )
-        const byStatus = Object.fromEntries(rows.map(r => [r.status, r.c]))
-        stats[name] = {
-          pending:   byStatus.pending   ?? 0,
-          running:   byStatus.running   ?? 0,
-          completed: byStatus.completed ?? 0,
-          failed:    byStatus.failed    ?? 0,
-        }
-      } else if (adapter._pending) {
-        // Memory adapter
-        stats[name] = {
-          pending:   adapter._pending.length,
-          running:   adapter._inFlight?.size ?? 0,
-          completed: adapter._completed.length,
-          failed:    adapter._dead.length,
-        }
-      } else {
-        stats[name] = { pending: await q.size(), running: 0, completed: 0, failed: 0 }
-      }
+      stats[name] = await q._adapter.stats()
     } catch (_) {
       stats[name] = { pending: 0, running: 0, completed: 0, failed: 0 }
     }
@@ -682,45 +657,18 @@ async function _collectStats(queues) {
 
 async function _listActiveJobs(adapter) {
   try {
-    if (adapter._all) {
-      return adapter._all(
-        `SELECT id, name, args, priority, status, progress, started_at, created_at
-         FROM _arc_jobs
-         WHERE status IN ('pending','running')
-         ORDER BY priority DESC, scheduled_at ASC
-         LIMIT 100`
-      ).map(r => ({
-        ...r,
-        args: _tryParse(r.args),
-        priority: _scoreToPriority(r.priority),
-      }))
-    } else if (adapter._pending) {
-      return [
-        ...adapter._pending.map(j => ({ ...j, status: 'pending', priority: _scoreToPriority(j.priority) })),
-        ...[...(adapter._inFlight ?? new Map()).entries()].map(([id, v]) => ({ id, ...v, status: 'running', priority: _scoreToPriority(v.priority ?? 5) })),
-      ]
-    }
-  } catch (_) {}
-  return []
+    const jobs = await adapter.listActive()
+    return jobs.map(j => ({ ...j, priority: _scoreToPriority(j.priority) }))
+  } catch (e) {
+    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', event: 'list_active_jobs_error', error: e?.message ?? String(e) }))
+    return []
+  }
 }
 
 async function _collectLocks(queues) {
   const locks = []
   for (const [, q] of Object.entries(queues)) {
-    const adapter = q._adapter
-    try {
-      if (adapter._all) {
-        const rows = adapter._all(
-          `SELECT lock_key as \`key\`, locked_until as expiresAt FROM _arc_jobs WHERE lock_key IS NOT NULL AND locked_until > ?1 AND status IN ('pending','running')`,
-          Date.now()
-        )
-        locks.push(...rows)
-      } else if (adapter._locks) {
-        for (const [key, expiresAt] of adapter._locks.entries()) {
-          if (expiresAt > Date.now()) locks.push({ key, expiresAt })
-        }
-      }
-    } catch (_) {}
+    try { locks.push(...await q._adapter.listLocks()) } catch (_) {}
   }
   return locks
 }

@@ -1,22 +1,11 @@
 'use strict'
 
+const { openDb } = require('./_db')
+
 module.exports = async function replay(args) {
   const dbPath = args.find((_, i) => args[i - 1] === '--db') ?? 'app.db'
   const jobFilter = args.find((_, i) => args[i - 1] === '--job')
-
-  let db
-  try {
-    const { Database } = require('bun:sqlite')
-    db = new Database(dbPath)
-  } catch (_) {
-    try {
-      const Database = require('better-sqlite3')
-      db = new Database(dbPath)
-    } catch (_) {
-      console.error('arc-jobs replay: could not open database.')
-      process.exit(1)
-    }
-  }
+  const db = openDb(dbPath, 'arc-jobs replay')
 
   const run = (sql, ...params) => db.run ? db.run(sql, ...params) : db.prepare(sql).run(...params)
   const query = (sql, ...params) => db.query ? db.query(sql).all(...params) : db.prepare(sql).all(...params)

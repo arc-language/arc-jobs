@@ -1,5 +1,7 @@
 'use strict'
 
+const { log, errMsg } = require('../log')
+
 // Base adapter — defines the interface all queue backends must implement.
 // Subclasses override these methods; shared retry/DLQ logic lives here.
 
@@ -29,11 +31,48 @@ class BaseAdapter {
   async replayDead() { throw new Error('not implemented') }
   async acquireLock(_key, _ttlMs) { return true }              // optional: override for @unique
   async releaseLock(_key) {}
+  async stats() { return { pending: await this.size(), running: 0, completed: 0, failed: 0 } }
+  async listActive() { return [] }
+  async listLocks() { return [] }
 
   // ── Shared processor ──────────────────────────────────────────────────────
 
+  _log(level, fields) { log(level, { queue: this.name, ...fields }) }
+
+  _backoff(attempts, baseMs = 1000) {
+    return baseMs * 2 ** (attempts - 1) + Math.random() * 500
+  }
+
   priorityScore(p) {
     return _PRIORITY[p] ?? 5
+  }
+
+  async _handleJobSuccess(job, entry, registry) {
+    try {
+      await this.complete(job.id)
+      if (entry.thenJob && registry[entry.thenJob]) {
+        try { await this.enqueue(entry.thenJob, job.args ?? []) } catch (e) {
+          this._log('error', { job: job.name, event: 'then_enqueue_failed', thenJob: entry.thenJob, error: errMsg(e) })
+        }
+      }
+    } catch (storErr) {
+      this._log('error', { job: job.name, event: 'complete_storage_error', error: errMsg(storErr) })
+    }
+    this._log('info', { job: job.name, event: 'completed', ms: Date.now() - (job.startedAt ?? Date.now()) })
+  }
+
+  async _handleJobFailure(job, entry, e) {
+    const attempts = (job.attempts ?? 0) + 1
+    const maxAttempts = entry.maxRetries ?? job.maxAttempts ?? 3
+    try { await this.fail(job.id, errMsg(e), attempts, maxAttempts) } catch (storErr) {
+      this._log('error', { job: job.name, event: 'fail_storage_error', error: errMsg(storErr) })
+    }
+    if (attempts < maxAttempts) {
+      const backoff = this._backoff(attempts, entry.backoffMs)
+      this._log('warn', { job: job.name, event: 'retry', attempt: attempts, backoffMs: Math.round(backoff) })
+    } else {
+      this._log('error', { job: job.name, event: 'dlq', error: errMsg(e) })
+    }
   }
 
   async _runJob(job, registry) {
@@ -42,38 +81,15 @@ class BaseAdapter {
       await this.fail(job.id, `no handler registered for job '${job.name}'`, job.attempts + 1, 1)
       return
     }
-
     const timeoutMs = entry.timeoutMs ?? this._timeout
     try {
       await Promise.race([
         entry.fn(...(job.args ?? [])),
         new Promise((_, rej) => setTimeout(() => rej(new Error(`job timed out after ${timeoutMs}ms`)), timeoutMs)),
       ])
-      let completeErr = null
-      try { await this.complete(job.id) } catch (storErr) {
-        completeErr = storErr
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'complete_storage_error', error: storErr?.message ?? String(storErr) }))
-      }
-      if (!completeErr && entry.thenJob && registry[entry.thenJob]) {
-        try {
-          await this.enqueue(entry.thenJob, job.args ?? [])
-        } catch (e) {
-          console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'then_enqueue_failed', thenJob: entry.thenJob, error: e?.message ?? String(e) }))
-        }
-      }
-      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, job: job.name, event: 'completed', ms: Date.now() - (job.startedAt ?? Date.now()) }))
+      await this._handleJobSuccess(job, entry, registry)
     } catch (e) {
-      const attempts = (job.attempts ?? 0) + 1
-      const maxAttempts = entry.maxRetries ?? job.maxAttempts ?? 3
-      try { await this.fail(job.id, e?.message ?? String(e), attempts, maxAttempts) } catch (storErr) {
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'fail_storage_error', error: storErr?.message ?? String(storErr) }))
-      }
-      if (attempts < maxAttempts) {
-        const backoff = (entry.backoffMs ?? 1000) * 2 ** (attempts - 1) + Math.random() * 500
-        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', queue: this.name, job: job.name, event: 'retry', attempt: attempts, backoffMs: Math.round(backoff) }))
-      } else {
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'dlq', error: e?.message ?? String(e) }))
-      }
+      await this._handleJobFailure(job, entry, e)
     }
   }
 
@@ -81,7 +97,7 @@ class BaseAdapter {
     while (this._running < this._concurrency) {
       let job
       try { job = await this.dequeue() } catch (e) {
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, event: 'dequeue_error', error: e?.message ?? String(e) }))
+        this._log('error', { event: 'dequeue_error', error: errMsg(e) })
         break
       }
       if (!job) break

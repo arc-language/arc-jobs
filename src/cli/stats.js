@@ -1,21 +1,10 @@
 'use strict'
 
+const { openDb } = require('./_db')
+
 module.exports = async function stats(args) {
   const dbPath = args.find((_, i) => args[i - 1] === '--db') ?? 'app.db'
-
-  let db
-  try {
-    const { Database } = require('bun:sqlite')
-    db = new Database(dbPath)
-  } catch (_) {
-    try {
-      const Database = require('better-sqlite3')
-      db = new Database(dbPath)
-    } catch (_) {
-      console.error('arc-jobs stats: could not open database. Use --db <path> to specify.')
-      process.exit(1)
-    }
-  }
+  const db = openDb(dbPath, 'arc-jobs stats')
 
   const query = (sql, ...params) => {
     if (db.query) return db.query(sql).all(...params)

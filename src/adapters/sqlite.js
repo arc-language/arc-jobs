@@ -143,7 +143,7 @@ class SqliteAdapter extends BaseAdapter {
         id, error, attempts, Date.now()
       )
     } else {
-      const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
+      const delay = Math.round(this._backoff(attempts))
       this._run(
         `UPDATE _arc_jobs SET status = 'pending', attempts = ?2, scheduled_at = ?3, error = ?4
          WHERE id = ?1`,
@@ -171,7 +171,7 @@ class SqliteAdapter extends BaseAdapter {
     const changed = result?.changes ?? result
     if (changed) {
       if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
-      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this._queueName, event: 'replay_one', id, found: true }))
+      this._log('info', { event: 'replay_one', id, found: true })
     }
     return !!changed
   }
@@ -203,7 +203,7 @@ class SqliteAdapter extends BaseAdapter {
     // Use transaction if available (better-sqlite3) to make count + update atomic
     const count = this._db.transaction ? this._db.transaction(doReplay)() : doReplay()
     if (count > 0 && this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
-    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this._queueName, event: 'replay_dead', count }))
+    this._log('info', { event: 'replay_dead', count })
     return count
   }
 
@@ -229,6 +229,38 @@ class SqliteAdapter extends BaseAdapter {
 
   async releaseLock(key) {
     this._run(`UPDATE _arc_jobs SET locked_until = NULL WHERE lock_key = ?1`, key)
+  }
+
+  async stats() {
+    const rows = this._all(
+      `SELECT status, COUNT(*) as c FROM _arc_jobs WHERE queue=?1 GROUP BY status`,
+      this._queueName
+    )
+    const byStatus = Object.fromEntries(rows.map(r => [r.status, r.c]))
+    return {
+      pending:   byStatus.pending   ?? 0,
+      running:   byStatus.running   ?? 0,
+      completed: byStatus.completed ?? 0,
+      failed:    byStatus.failed    ?? 0,
+    }
+  }
+
+  async listActive() {
+    return this._all(
+      `SELECT id, name, args, priority, status, progress, started_at, created_at
+       FROM _arc_jobs
+       WHERE queue=?1 AND status IN ('pending','running')
+       ORDER BY priority DESC, scheduled_at ASC
+       LIMIT 100`,
+      this._queueName
+    ).map(r => ({ ...r, args: (() => { try { return JSON.parse(r.args) } catch (_) { return r.args } })() }))
+  }
+
+  async listLocks() {
+    return this._all(
+      `SELECT lock_key as \`key\`, locked_until as expiresAt FROM _arc_jobs WHERE lock_key IS NOT NULL AND locked_until > ?1 AND status IN ('pending','running')`,
+      Date.now()
+    )
   }
 
   // Start polling for delayed jobs (called when scheduler or delayed enqueue is used)

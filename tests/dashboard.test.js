@@ -113,12 +113,12 @@ describe('arcJobsHandle()', () => {
   describe('/api/jobs/:id/cancel', () => {
     test('cancels a pending job', async () => {
       const id = await adapter.enqueue('CancelMe', [])
-      assert.strictEqual(adapter._pending.length, 1)
+      assert.strictEqual(await adapter.size(), 1)
 
       const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/jobs/' + id + '/cancel'), queues)
       const data = await res.json()
       assert.strictEqual(data.ok, true)
-      assert.strictEqual(adapter._pending.length, 0)
+      assert.strictEqual(await adapter.size(), 0)
     })
 
     test('cancel returns ok even for unknown id', async () => {
@@ -136,8 +136,9 @@ describe('arcJobsHandle()', () => {
     })
 
     test('returns dead jobs', async () => {
-      // Manually push to dead queue to simulate failed job
-      adapter._dead.push({ id: 'dead-1', name: 'FailedJob', args: [99], error: 'boom', failedAt: new Date().toISOString() })
+      const id = await adapter.enqueue('FailedJob', [99])
+      await adapter.dequeue()
+      await adapter.fail(id, 'boom', 3, 3)
       const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/dlq?queue=default'), queues)
       const data = await res.json()
       assert.strictEqual(data.jobs.length, 1)
@@ -148,26 +149,32 @@ describe('arcJobsHandle()', () => {
   describe('/api/dlq/replay (all)', () => {
     test('replays all dead jobs', async () => {
       q.register('FailedJob', async () => {})
-      adapter._dead.push({ id: 'dead-1', name: 'FailedJob', args: [] })
-      adapter._dead.push({ id: 'dead-2', name: 'FailedJob', args: [] })
+      const id1 = await adapter.enqueue('FailedJob', [])
+      const id2 = await adapter.enqueue('FailedJob', [])
+      await adapter.dequeue()
+      await adapter.dequeue()
+      await adapter.fail(id1, 'err', 3, 3)
+      await adapter.fail(id2, 'err', 3, 3)
 
       const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/dlq/replay?queue=default'), queues)
       const data = await res.json()
       assert.strictEqual(data.replayed, 2)
-      assert.strictEqual(adapter._pending.length, 2)
+      assert.strictEqual(await adapter.size(), 2)
     })
   })
 
   describe('/api/dlq/:id/replay', () => {
     test('replays a single dead job by id', async () => {
       q.register('OneJob', async () => {})
-      adapter._dead.push({ id: 'dead-one', name: 'OneJob', args: [5] })
+      const jobId = await adapter.enqueue('OneJob', [5])
+      await adapter.dequeue()
+      await adapter.fail(jobId, 'err', 3, 3)
 
-      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/dlq/dead-one/replay'), queues)
+      const res = await arcJobsHandle(makeRequest('POST', '/_arc/jobs/api/dlq/' + jobId + '/replay'), queues)
       const data = await res.json()
       assert.strictEqual(data.ok, true)
-      assert.strictEqual(adapter._pending.length, 1)
-      assert.strictEqual(adapter._pending[0].name, 'OneJob')
+      assert.strictEqual(await adapter.size(), 1)
+      assert.strictEqual(adapter.pending('OneJob').length, 1)
     })
   })
 
@@ -188,7 +195,8 @@ describe('arcJobsHandle()', () => {
     })
 
     test('does not return expired locks', async () => {
-      adapter._locks.set('old-lock', Date.now() - 1000)  // already expired
+      await adapter.acquireLock('old-lock', 1)  // 1ms TTL — expires immediately
+      await new Promise(r => setTimeout(r, 10))
       const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/locks'), queues)
       const data = await res.json()
       assert.deepStrictEqual(data.locks, [])
@@ -198,12 +206,12 @@ describe('arcJobsHandle()', () => {
   describe('/api/locks/:key DELETE', () => {
     test('releases an active lock', async () => {
       await adapter.acquireLock('my-lock', 60000)
-      assert.ok(adapter._locks.has('my-lock'))
+      assert.strictEqual(await adapter.acquireLock('my-lock', 60000), false)  // lock is held
 
       const res = await arcJobsHandle(makeRequest('DELETE', '/_arc/jobs/api/locks/my-lock'), queues)
       const data = await res.json()
       assert.strictEqual(data.ok, true)
-      assert.ok(!adapter._locks.has('my-lock'))
+      assert.strictEqual(await adapter.acquireLock('my-lock', 60000), true)  // lock was released
     })
 
     test('URL-encoded lock keys are decoded', async () => {

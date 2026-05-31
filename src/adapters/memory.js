@@ -1,6 +1,7 @@
 'use strict'
 
 const { BaseAdapter, _PRIORITY } = require('./base')
+const { errMsg } = require('../log')
 
 // In-memory adapter — development default and test mode.
 // In NODE_ENV=test: synchronous, does NOT auto-process (call Queue.flush() explicitly).
@@ -75,7 +76,7 @@ class MemoryAdapter extends BaseAdapter {
       if (this._dead.length > 1000) this._dead.splice(0, this._dead.length - 1000)
       this._statusMap.set(id, 'failed')
     } else {
-      const delay = 1000 * 2 ** (attempts - 1) + Math.random() * 500
+      const delay = this._backoff(attempts)
       const retryJob = { ...(original ?? {}), id, attempts, scheduledAt: Date.now() + Math.round(delay) }
       _insertSorted(this._pending, retryJob)
       this._statusMap.set(id, 'pending')
@@ -104,7 +105,7 @@ class MemoryAdapter extends BaseAdapter {
     }
     this._dead = toKeep
     for (const job of toReplay) await this.enqueue(job.name, job.args ?? [])
-    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_dead', count: toReplay.length }))
+    this._log('info', { event: 'replay_dead', count: toReplay.length })
     return toReplay.length
   }
 
@@ -121,7 +122,7 @@ class MemoryAdapter extends BaseAdapter {
     const [job] = this._dead.splice(idx, 1)
     await this.enqueue(job.name, job.args ?? [])
     this._statusMap.delete(id)  // old id status cleared; new enqueue assigns a fresh id
-    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_one', id, job: job.name }))
+    this._log('info', { event: 'replay_one', id, job: job.name })
     return true
   }
 
@@ -134,6 +135,30 @@ class MemoryAdapter extends BaseAdapter {
 
   async releaseLock(key) {
     this._locks.delete(key)
+  }
+
+  async stats() {
+    return {
+      pending:   this._pending.filter(j => j.scheduledAt <= Date.now()).length,
+      running:   this._inFlight.size,
+      completed: this._completed.length,
+      failed:    this._dead.length,
+    }
+  }
+
+  async listActive() {
+    return [
+      ...this._pending.map(j => ({ ...j, status: 'pending' })),
+      ...[...this._inFlight.entries()].map(([id, v]) => ({ id, ...v, status: 'running' })),
+    ]
+  }
+
+  async listLocks() {
+    const locks = []
+    for (const [key, expiresAt] of this._locks.entries()) {
+      if (expiresAt > Date.now()) locks.push({ key, expiresAt })
+    }
+    return locks
   }
 
   // ── Test helpers ────────────────────────────────────────────────────────────

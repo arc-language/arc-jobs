@@ -8,7 +8,10 @@ module.exports = async function init(_args) {
   const configPath = path.resolve('arc.config.json')
   let config = {}
   if (fs.existsSync(configPath)) {
-    try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')) } catch (_) {}
+    try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')) } catch (e) {
+      console.error(`arc-jobs init: could not parse arc.config.json: ${e.message}`)
+      process.exit(1)
+    }
   }
 
   if (config.queues) {

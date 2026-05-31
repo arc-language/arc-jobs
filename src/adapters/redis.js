@@ -1,6 +1,7 @@
 'use strict'
 
 const { BaseAdapter, _PRIORITY } = require('./base')
+const { errMsg } = require('../log')
 
 // Redis adapter — high-throughput, multi-worker deployments.
 // Uses Bun.Redis (built-in) on Bun, or ioredis on Node.js.
@@ -79,7 +80,7 @@ class RedisAdapter extends BaseAdapter {
       } catch (e) {
         // Best-effort restore to delayed set to avoid silent job loss
         try { await r.zadd(this._delayedKey, job.scheduledAt ?? Date.now() + 60000, payload) } catch (_) {}
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, event: 'promote_delayed_failed', error: e?.message ?? String(e) }))
+        this._log('error', { event: 'promote_delayed_failed', error: errMsg(e) })
       }
     }
   }
@@ -102,7 +103,7 @@ class RedisAdapter extends BaseAdapter {
       await r.hset(this._metaPrefix + id, { status: 'failed', error, attempts, completedAt: Date.now() })
       await r.lpush(this._dlqKey, dlqEntry)
     } else {
-      const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
+      const delay = Math.round(this._backoff(attempts))
       if (meta?.name) {
         const payload = JSON.stringify({ id, name: meta.name, args: metaArgs, priority: +(meta.priority ?? 5), attempts, maxAttempts })
         await r.zadd(this._delayedKey, Date.now() + delay, payload)
@@ -129,7 +130,7 @@ class RedisAdapter extends BaseAdapter {
       if (job?.id === id && job?.name) {
         await this.enqueue(job.name, job.args ?? [])
         await r.lrem(this._dlqKey, 1, item)
-        console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_one', id, job: job.name }))
+        this._log('info', { event: 'replay_one', id, job: job.name })
         return true
       }
     }
@@ -171,7 +172,7 @@ class RedisAdapter extends BaseAdapter {
         count++
       }
     }
-    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_dead', count }))
+    this._log('info', { event: 'replay_dead', count })
     return count
   }
 

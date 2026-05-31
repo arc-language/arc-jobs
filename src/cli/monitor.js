@@ -1,21 +1,10 @@
 'use strict'
 
+const { openDb } = require('./_db')
+
 module.exports = async function monitor(args) {
   const dbPath = args.find((_, i) => args[i - 1] === '--db') ?? 'app.db'
-
-  let db
-  try {
-    const { Database } = require('bun:sqlite')
-    db = new Database(dbPath)
-  } catch (_) {
-    try {
-      const Database = require('better-sqlite3')
-      db = new Database(dbPath)
-    } catch (_) {
-      console.error('arc-jobs monitor: could not open database.')
-      process.exit(1)
-    }
-  }
+  const db = openDb(dbPath, 'arc-jobs monitor')
 
   const query = (sql, ...params) => {
     try {

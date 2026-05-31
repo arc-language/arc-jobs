@@ -27,9 +27,10 @@ describe('MemoryAdapter', () => {
 
   test('enqueue adds job to pending list', async () => {
     await adapter.enqueue('TestJob', ['hello'])
-    assert.strictEqual(adapter._pending.length, 1)
-    assert.strictEqual(adapter._pending[0].name, 'TestJob')
-    assert.deepStrictEqual(adapter._pending[0].args, ['hello'])
+    assert.strictEqual(await adapter.size(), 1)
+    const job = await adapter.dequeue()
+    assert.strictEqual(job.name, 'TestJob')
+    assert.deepStrictEqual(job.args, ['hello'])
   })
 
   test('dequeue returns and removes the next pending job', async () => {
@@ -38,7 +39,7 @@ describe('MemoryAdapter', () => {
     assert.ok(job !== null)
     assert.strictEqual(job.name, 'TestJob')
     assert.deepStrictEqual(job.args, [42])
-    assert.strictEqual(adapter._pending.length, 0)
+    assert.strictEqual(await adapter.size(), 0)
   })
 
   test('dequeue returns null when queue is empty', async () => {
@@ -104,9 +105,11 @@ describe('MemoryAdapter', () => {
     await adapter.enqueue('A', [])
     await adapter.enqueue('B', [])
     adapter.reset()
-    assert.strictEqual(adapter._pending.length, 0)
-    assert.strictEqual(adapter._completed.length, 0)
-    assert.strictEqual(adapter._dead.length, 0)
+    assert.strictEqual(await adapter.size(), 0)
+    const dead = await adapter.dead()
+    assert.strictEqual(dead.length, 0)
+    const stats = await adapter.stats()
+    assert.strictEqual(stats.completed, 0)
   })
 
   describe('@unique lock', () => {
