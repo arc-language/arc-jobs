@@ -120,6 +120,23 @@ describe('createQueue()', () => {
     })
   })
 
+  describe('updateProgress with _progressBroadcast', () => {
+    test('updateProgress calls _progressBroadcast when set', async () => {
+      const broadcasts = []
+      queue._progressBroadcast = (id, pct, meta) => broadcasts.push({ id, pct, meta })
+      await queue.updateProgress('job-123', 55, { step: 'upload' })
+      assert.strictEqual(broadcasts.length, 1)
+      assert.strictEqual(broadcasts[0].id, 'job-123')
+      assert.strictEqual(broadcasts[0].pct, 55)
+      assert.deepStrictEqual(broadcasts[0].meta, { step: 'upload' })
+      delete queue._progressBroadcast
+    })
+
+    test('updateProgress works without _progressBroadcast (no error)', async () => {
+      await assert.doesNotReject(() => queue.updateProgress('job-456', 80))
+    })
+  })
+
   describe('job @then chain simulation', () => {
     test('thenJob is auto-enqueued by _runJob', async () => {
       const log = []

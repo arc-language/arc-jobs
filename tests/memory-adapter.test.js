@@ -140,6 +140,15 @@ describe('MemoryAdapter', () => {
   })
 
   describe('test helpers', () => {
+    test('assertQueue passes when job name is pending', async () => {
+      await adapter.enqueue('MyJob', [1])
+      assert.doesNotThrow(() => adapter.assertQueue('MyJob'))
+    })
+
+    test('assertQueue throws when job name is not pending', () => {
+      assert.throws(() => adapter.assertQueue('NoSuchJob'), /no pending job 'NoSuchJob'/)
+    })
+
     test('assertEnqueued passes when job is pending', async () => {
       await adapter.enqueue('MyJob', [99])
       assert.doesNotThrow(() => adapter.assertEnqueued('MyJob', [99]))
