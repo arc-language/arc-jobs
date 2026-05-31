@@ -21,8 +21,9 @@ module.exports = async function replay(args) {
   const run = (sql, ...params) => db.run ? db.run(sql, ...params) : db.prepare(sql).run(...params)
   const query = (sql, ...params) => db.query ? db.query(sql).all(...params) : db.prepare(sql).all(...params)
 
-  const filter = jobFilter ? `AND name = '${jobFilter.replace(/'/g, "''")}'` : ''
-  const dead = query(`SELECT id, name, args, error FROM _arc_jobs WHERE status = 'failed' ${filter} ORDER BY completed_at DESC`)
+  const dead = jobFilter
+    ? query(`SELECT id, name, args, error FROM _arc_jobs WHERE status = 'failed' AND name = ?1 ORDER BY completed_at DESC`, jobFilter)
+    : query(`SELECT id, name, args, error FROM _arc_jobs WHERE status = 'failed' ORDER BY completed_at DESC`)
 
   if (!dead.length) {
     console.log(`No failed jobs found${jobFilter ? ` for '${jobFilter}'` : ''}.`)

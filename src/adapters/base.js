@@ -49,16 +49,20 @@ class BaseAdapter {
       ])
       await this.complete(job.id)
       if (entry.thenJob && registry[entry.thenJob]) {
-        await this.enqueue(entry.thenJob, job.args ?? [])
+        try {
+          await this.enqueue(entry.thenJob, job.args ?? [])
+        } catch (e) {
+          console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'then_enqueue_failed', thenJob: entry.thenJob, error: e?.message ?? String(e) }))
+        }
       }
-      console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, job: job.name, event: 'completed', ms: Date.now() - (job.startedAt ?? Date.now()) }))
+      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, job: job.name, event: 'completed', ms: Date.now() - (job.startedAt ?? Date.now()) }))
     } catch (e) {
       const attempts = (job.attempts ?? 0) + 1
       const maxAttempts = entry.maxRetries ?? job.maxAttempts ?? 3
       await this.fail(job.id, e?.message ?? String(e), attempts, maxAttempts)
       if (attempts < maxAttempts) {
         const backoff = (entry.backoffMs ?? 1000) * Math.pow(2, attempts - 1) + Math.random() * 500
-        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', queue: this.name, job: job.name, event: 'retry', attempt: attempts, backoffMs: Math.round(backoff) }))
+        console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', queue: this.name, job: job.name, event: 'retry', attempt: attempts, backoffMs: Math.round(backoff) }))
       } else {
         console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'dlq', error: e?.message ?? String(e) }))
       }
@@ -72,7 +76,7 @@ class BaseAdapter {
       this._running++
       this._runJob(job, registry).finally(() => {
         this._running--
-        this.tryProcess(registry)
+        setImmediate(() => this.tryProcess(registry))
         this._maybeDrain()
       })
     }
@@ -82,18 +86,22 @@ class BaseAdapter {
     this.size().then(n => {
       if (n === 0 && this._running === 0) {
         const resolvers = this._drainResolvers.splice(0)
-        for (const r of resolvers) r()
+        for (const r of resolvers) r(null)
       }
-    }).catch(() => {})
+    }).catch(err => {
+      const resolvers = this._drainResolvers.splice(0)
+      for (const r of resolvers) r(err)
+    })
   }
 
   drain(timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const check = async () => {
-        const n = await this.size().catch(() => 0)
+        const n = await this.size().catch(err => { reject(err); return -1 })
+        if (n === -1) return
         if (n === 0 && this._running === 0) return resolve()
         const timer = setTimeout(() => reject(new Error(`[arc-jobs] drain timed out after ${timeoutMs}ms`)), timeoutMs)
-        this._drainResolvers.push(() => { clearTimeout(timer); resolve() })
+        this._drainResolvers.push(err => { clearTimeout(timer); err ? reject(err) : resolve() })
       }
       check()
     })

@@ -60,7 +60,9 @@ class RedisAdapter extends BaseAdapter {
     if (!result || result.length === 0) return null
     const payload = Array.isArray(result) ? result[0] : result
     if (!payload) return null
-    const job = JSON.parse(typeof payload === 'string' ? payload : payload[0])
+    let job
+    try { job = JSON.parse(typeof payload === 'string' ? payload : payload[0]) } catch (_) { return null }
+    if (!job) return null
     const now = Date.now()
     await r.hset(this._metaPrefix + job.id, { status: 'running', startedAt: now })
     return { ...job, startedAt: now }
@@ -70,8 +72,9 @@ class RedisAdapter extends BaseAdapter {
     const ready = await r.zrangebyscore(this._delayedKey, '-inf', Date.now())
     if (!ready?.length) return
     for (const payload of ready) {
+      let job
+      try { job = JSON.parse(payload) } catch (_) { continue }
       await r.zrem(this._delayedKey, payload)
-      const job = JSON.parse(payload)
       await r.zadd(this._queueKey, job.priority ?? 5, payload)
     }
   }
@@ -114,7 +117,7 @@ class RedisAdapter extends BaseAdapter {
   async dead() {
     const r = await this._getClient()
     const items = await r.lrange(`arc:jobs:${this.name}:dlq`, 0, 99)
-    return items.map(i => JSON.parse(i))
+    return items.flatMap(i => { try { return [JSON.parse(i)] } catch (_) { return [] } })
   }
 
   async replayDead() {

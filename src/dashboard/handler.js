@@ -53,7 +53,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
   .shell { display: grid; grid-template-columns: 200px 1fr; min-height: 100vh }
   .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 24px 16px; display: flex; flex-direction: column; gap: 4px }
   .sidebar-logo { font-weight: 700; font-size: 16px; color: var(--accent); margin-bottom: 16px; padding: 0 8px }
-  .nav-item { padding: 6px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); transition: all .15s; white-space: nowrap }
+  .nav-item { padding: 6px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); transition: all .15s; white-space: nowrap; background: none; border: none; font-size: 14px; font-family: var(--font); text-align: left; width: 100% }
   .nav-item:hover, .nav-item.active { background: rgba(99,102,241,.15); color: var(--text) }
   .main { padding: 32px; overflow: auto }
   .page { display: none }
@@ -71,9 +71,9 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
 
   /* Queue tabs */
   .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px }
-  .tab { padding: 8px 16px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: all .15s; margin-bottom: -1px }
+  .tab { padding: 8px 16px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: all .15s; margin-bottom: -1px; background: none; border-top: none; border-left: none; border-right: none; font-size: 14px; font-family: var(--font) }
   .tab:hover { color: var(--text) }
-  .tab.active { color: var(--accent); border-color: var(--accent) }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent) }
 
   /* Table */
   table { width: 100%; border-collapse: collapse }
@@ -118,18 +118,18 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
   .section-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; margin-top: 24px }
 
   /* Modal-ish error toast */
-  #toast { position: fixed; bottom: 24px; right: 24px; background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999 }
+  #toast { position: fixed; bottom: 24px; right: 24px; background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; pointer-events: none }
 </style>
 </head>
 <body>
 <div class="shell">
-  <nav class="sidebar">
+  <nav class="sidebar" aria-label="Dashboard navigation">
     <div class="sidebar-logo">arc-jobs</div>
-    <div class="nav-item active" data-page="overview">Overview</div>
-    <div class="nav-item" data-page="jobs">Active Jobs</div>
-    <div class="nav-item" data-page="schedules">Schedules</div>
-    <div class="nav-item" data-page="locks">Locks</div>
-    <div class="nav-item" data-page="dlq">Dead Letter</div>
+    <button class="nav-item active" data-page="overview" aria-current="page">Overview</button>
+    <button class="nav-item" data-page="jobs">Active Jobs</button>
+    <button class="nav-item" data-page="schedules">Schedules</button>
+    <button class="nav-item" data-page="locks">Locks</button>
+    <button class="nav-item" data-page="dlq">Dead Letter</button>
   </nav>
   <main class="main">
 
@@ -191,7 +191,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
 
   </main>
 </div>
-<div id="toast"></div>
+<div id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
 <script>
 const BASE = '/_arc/jobs'
@@ -203,9 +203,10 @@ let _activePage = 'overview'
 
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'))
+    document.querySelectorAll('.nav-item').forEach(n => { n.classList.remove('active'); n.removeAttribute('aria-current') })
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
     el.classList.add('active')
+    el.setAttribute('aria-current', 'page')
     _activePage = el.dataset.page
     document.getElementById('page-' + _activePage).classList.add('active')
     refresh()
@@ -214,7 +215,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function badge(cls, text) { return '<span class="badge badge-' + cls + '">' + text + '</span>' }
+function badge(cls, text) { return '<span class="badge badge-' + esc(cls) + '">' + esc(String(text)) + '</span>' }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
 function age(ms) {
   const s = Math.floor((Date.now() - ms) / 1000)
@@ -233,14 +234,18 @@ function renderTabs(containerId, onSelect) {
   const bar = document.getElementById(containerId)
   if (!bar || !_queues.length) return
   if (bar.children.length === _queues.length) return
+  bar.setAttribute('role', 'tablist')
   bar.innerHTML = ''
   _queues.forEach((q, i) => {
-    const t = document.createElement('div')
+    const t = document.createElement('button')
     t.className = 'tab' + (i === 0 ? ' active' : '')
+    t.setAttribute('role', 'tab')
+    t.setAttribute('aria-selected', i === 0 ? 'true' : 'false')
     t.textContent = q
     t.addEventListener('click', () => {
-      bar.querySelectorAll('.tab').forEach(x => x.classList.remove('active'))
+      bar.querySelectorAll('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-selected', 'false') })
       t.classList.add('active')
+      t.setAttribute('aria-selected', 'true')
       _activeQueue = q
       onSelect(q)
     })
@@ -325,7 +330,7 @@ async function loadLocks() {
     return '<tr>' +
       '<td><span class="mono">' + esc(l.key) + '</span></td>' +
       '<td>' + ttl + 's</td>' +
-      '<td><button class="btn btn-danger" onclick="unlockKey(\'' + esc(l.key) + '\')">Force Unlock</button></td>' +
+      '<td><button class="btn btn-danger" onclick="unlockKey(' + JSON.stringify(l.key) + ')">Force Unlock</button></td>' +
       '</tr>'
   }).join('')
 }
@@ -399,9 +404,34 @@ setInterval(refresh, 2000)
 </body>
 </html>`
 
+// ── Auth guard ───────────────────────────────────────────────────────────────
+
+async function _checkAuth(req, auth) {
+  if (!auth) {
+    // Fallback: secret token via env var
+    const secret = process.env.ARC_JOBS_SECRET
+    if (!secret) return true  // no guard configured — allow (warn at startup, not per-request)
+    const authHeader = req.headers.get('authorization') ?? ''
+    const token = authHeader.replace(/^Bearer\s+/i, '') || (new URL(req.url).searchParams.get('token') ?? '')
+    return token === secret
+  }
+  return auth(req)
+}
+
+const _401_HTML = '<!DOCTYPE html><html><head><title>Unauthorized</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f1117;color:#e2e8f0"><h2 style="color:#ef4444">401 Unauthorized</h2><p>You must be an admin to access the arc-jobs dashboard.</p></body></html>'
+
 // ── Request handler ──────────────────────────────────────────────────────────
 
-async function arcJobsHandle(req, queues = {}, schedules = []) {
+/**
+ * @param {Request} req
+ * @param {Record<string, import('../types').Queue>} queues
+ * @param {Array} schedules
+ * @param {{ auth?: (req: Request) => Promise<boolean> }} opts
+ *   `auth`: async function that returns true if the request is authorized.
+ *   In Arc apps, pass `async (req) => { const s = await auth.session(req); return s?.role === 'admin' || s?.role === 'superuser' }`.
+ *   Falls back to ARC_JOBS_SECRET env var token check if omitted.
+ */
+async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   const url = new URL(req.url)
   const path = url.pathname
 
@@ -409,6 +439,17 @@ async function arcJobsHandle(req, queues = {}, schedules = []) {
 
   const sub = path.slice('/_arc/jobs'.length) || '/'
   const method = req.method.toUpperCase()
+
+  // ── Auth check (skip for SSE progress — job owner polls their own job) ──
+  if (sub !== '/api/jobs' || !sub.match(/^\/api\/jobs\/[^/]+\/progress$/)) {
+    const ok = await _checkAuth(req, opts.auth)
+    if (!ok) {
+      if (sub === '/' || sub === '') {
+        return new Response(_401_HTML, { status: 401, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+      }
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } })
+    }
+  }
 
   // ── Dashboard HTML ──
   if (sub === '/' || sub === '') {
@@ -448,11 +489,20 @@ async function arcJobsHandle(req, queues = {}, schedules = []) {
   const progMatch = sub.match(/^\/api\/jobs\/([^/]+)\/progress$/)
   if (progMatch && method === 'GET') {
     const jobId = progMatch[1]
+    let _ctrl
     const stream = new ReadableStream({
       start(controller) {
+        _ctrl = controller
         let set = _progressListeners.get(jobId)
         if (!set) { set = new Set(); _progressListeners.set(jobId, set) }
         set.add(controller)
+      },
+      cancel() {
+        const set = _progressListeners.get(jobId)
+        if (set && _ctrl) {
+          set.delete(_ctrl)
+          if (set.size === 0) _progressListeners.delete(jobId)
+        }
       },
     })
     return new Response(stream, {

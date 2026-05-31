@@ -41,8 +41,10 @@ class MemoryAdapter extends BaseAdapter {
   }
 
   async complete(id) {
+    const job = this._inFlight.get(id)
     this._inFlight.delete(id)
-    this._completed.push({ id, name: this._inFlight.get(id)?.name, completedAt: Date.now() })
+    this._completed.push({ id, name: job?.name, completedAt: Date.now() })
+    if (this._completed.length > 1000) this._completed.splice(0, this._completed.length - 1000)
   }
 
   async fail(id, error, attempts, maxAttempts) {
@@ -55,8 +57,9 @@ class MemoryAdapter extends BaseAdapter {
         error,
         failedAt: new Date().toISOString(),
       })
-      this._inFlight.delete(id)
+      if (this._dead.length > 1000) this._dead.splice(0, this._dead.length - 1000)
     }
+    this._inFlight.delete(id)
   }
 
   async status(id) {
@@ -98,7 +101,7 @@ class MemoryAdapter extends BaseAdapter {
   // ── Test helpers ────────────────────────────────────────────────────────────
 
   pending(name) { return this._pending.filter(j => !name || j.name === name) }
-  completed(name) { return this._completed.filter(j => !name || j.id && true) }
+  completed(name) { return this._completed.filter(j => !name || j.name === name) }
 
   assertEnqueued(name, args) {
     const found = this._pending.some(j => j.name === name && JSON.stringify(j.args) === JSON.stringify(args))

@@ -110,10 +110,12 @@ class SqliteAdapter extends BaseAdapter {
     const changes = claimed.changes ?? claimed
     if (!changes) return null  // another worker claimed it
 
+    let args
+    try { args = JSON.parse(row.args) } catch (_) { args = [] }
     return {
       id: row.id,
       name: row.name,
-      args: JSON.parse(row.args),
+      args,
       attempts: row.attempts,
       maxAttempts: row.max_attempts,
       startedAt: Date.now(),
