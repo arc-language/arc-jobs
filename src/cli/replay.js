@@ -38,4 +38,5 @@ module.exports = async function replay(args) {
     replayed++
   }
   console.log(`\nReplayed ${replayed} job(s). Start your server to process them.`)
+  if (db.close) db.close()
 }

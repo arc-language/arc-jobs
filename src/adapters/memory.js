@@ -49,6 +49,7 @@ class MemoryAdapter extends BaseAdapter {
 
   async fail(id, error, attempts, maxAttempts) {
     const original = this._inFlight.get(id)
+    this._inFlight.delete(id)
     if (attempts >= maxAttempts) {
       this._dead.push({
         id,
@@ -58,8 +59,13 @@ class MemoryAdapter extends BaseAdapter {
         failedAt: new Date().toISOString(),
       })
       if (this._dead.length > 1000) this._dead.splice(0, this._dead.length - 1000)
+    } else {
+      // Re-schedule for retry with exponential backoff
+      const delay = 1000 * Math.pow(2, attempts - 1) + Math.random() * 500
+      const retryJob = { ...(original ?? {}), id, attempts, scheduledAt: Date.now() + Math.round(delay) }
+      this._pending.push(retryJob)
+      this._pending.sort((a, b) => b.priority - a.priority || a.scheduledAt - b.scheduledAt)
     }
-    this._inFlight.delete(id)
   }
 
   async status(id) {
@@ -87,6 +93,19 @@ class MemoryAdapter extends BaseAdapter {
     return jobs.length
   }
 
+  async cancel(id) {
+    const idx = this._pending.findIndex(j => j.id === id)
+    if (idx !== -1) this._pending.splice(idx, 1)
+    this._inFlight.delete(id)
+  }
+
+  async replayOne(id) {
+    const idx = this._dead.findIndex(j => j.id === id)
+    if (idx === -1) return
+    const [job] = this._dead.splice(idx, 1)
+    await this.enqueue(job.name, job.args ?? [])
+  }
+
   async acquireLock(key, ttlMs) {
     const exp = this._locks.get(key)
     if (exp && exp > Date.now()) return false
@@ -108,7 +127,7 @@ class MemoryAdapter extends BaseAdapter {
     if (!found) throw new Error(`arc-jobs: no pending job '${name}' with args ${JSON.stringify(args)}`)
   }
 
-  assertQueue(name, queueName) {
+  assertQueue(name) {
     const found = this._pending.some(j => j.name === name)
     if (!found) throw new Error(`arc-jobs: no pending job '${name}'`)
   }
@@ -124,6 +143,7 @@ class MemoryAdapter extends BaseAdapter {
 
   reset() {
     this._pending = []
+    this._inFlight = new Map()
     this._completed = []
     this._failed = []
     this._dead = []

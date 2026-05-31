@@ -10,27 +10,27 @@ class RedisAdapter extends BaseAdapter {
   constructor(opts = {}) {
     super(opts)
     this._url = opts.url ?? process.env.REDIS_URL ?? 'redis://localhost:6379'
-    this._client = null
+    this._clientPromise = null
     this._queueKey = `arc:jobs:${this.name}:ready`
     this._delayedKey = `arc:jobs:${this.name}:delayed`
     this._metaPrefix = `arc:job:`
     this._pollTimer = null
   }
 
-  async _getClient() {
-    if (this._client) return this._client
+  _getClient() {
+    if (!this._clientPromise) this._clientPromise = this._connect()
+    return this._clientPromise
+  }
+
+  async _connect() {
     try {
-      // Bun has a built-in Redis client
-      this._client = new Bun.Redis(this._url)
-    } catch (_) {
-      try {
-        const { Redis } = require('ioredis')
-        this._client = new Redis(this._url)
-      } catch (_) {
-        throw new Error('[arc-jobs] Redis adapter requires Bun.Redis (Bun) or ioredis (npm install ioredis)')
-      }
-    }
-    return this._client
+      return new Bun.Redis(this._url)
+    } catch (_) {}
+    try {
+      const { Redis } = require('ioredis')
+      return new Redis(this._url)
+    } catch (_) {}
+    throw new Error('[arc-jobs] Redis adapter requires Bun.Redis (Bun) or ioredis (npm install ioredis)')
   }
 
   async enqueue(name, args, opts = {}) {
@@ -38,7 +38,7 @@ class RedisAdapter extends BaseAdapter {
     const id = crypto.randomUUID()
     const priority = _PRIORITY[opts.priority] ?? 5
     const payload = JSON.stringify({ id, name, args: args ?? [], priority, attempts: 0, maxAttempts: opts.maxAttempts ?? 3 })
-    const meta = { status: 'pending', createdAt: Date.now() }
+    const meta = { status: 'pending', createdAt: Date.now(), name, args: JSON.stringify(args ?? []), priority, maxAttempts: opts.maxAttempts ?? 3 }
 
     if (opts.at || opts.delayMs) {
       const score = opts.at ? +opts.at : Date.now() + opts.delayMs
@@ -94,11 +94,34 @@ class RedisAdapter extends BaseAdapter {
     } else {
       const delay = 1000 * Math.pow(2, attempts - 1) + Math.random() * 500
       const existing = await r.hgetall(this._metaPrefix + id)
-      if (existing) {
-        const payload = JSON.stringify({ id, name: existing.name, args: JSON.parse(existing.args ?? '[]'), priority: existing.priority ?? 5, attempts, maxAttempts })
+      if (existing?.name) {
+        let args
+        try { args = JSON.parse(existing.args ?? '[]') } catch (_) { args = [] }
+        const payload = JSON.stringify({ id, name: existing.name, args, priority: +(existing.priority ?? 5), attempts, maxAttempts })
         await r.zadd(this._delayedKey, Date.now() + delay, payload)
       }
       await r.hset(this._metaPrefix + id, { status: 'pending', attempts, error })
+    }
+  }
+
+  async cancel(id) {
+    const r = await this._getClient()
+    await r.hset(this._metaPrefix + id, { status: 'cancelled', completedAt: Date.now() })
+    await r.expire(this._metaPrefix + id, 86400)
+  }
+
+  async replayOne(id) {
+    const r = await this._getClient()
+    const dlqKey = `arc:jobs:${this.name}:dlq`
+    const items = await r.lrange(dlqKey, 0, -1)
+    for (const item of items) {
+      let job
+      try { job = JSON.parse(item) } catch (_) { continue }
+      if (job?.id === id) {
+        await r.lrem(dlqKey, 1, item)
+        if (this._registry?.[job.name]) await this.enqueue(job.name, job.args ?? [])
+        return
+      }
     }
   }
 
@@ -126,8 +149,9 @@ class RedisAdapter extends BaseAdapter {
     const items = await r.lrange(key, 0, -1)
     await r.del(key)
     for (const item of items) {
-      const job = JSON.parse(item)
-      if (this._registry?.[job.name]) {
+      let job
+      try { job = JSON.parse(item) } catch (_) { continue }
+      if (job?.name && this._registry?.[job.name]) {
         await this.enqueue(job.name, job.args ?? [])
       }
     }
@@ -157,8 +181,10 @@ class RedisAdapter extends BaseAdapter {
   }
 
   async disconnect() {
-    if (this._client?.disconnect) await this._client.disconnect()
-    else if (this._client?.quit) await this._client.quit()
+    const client = this._clientPromise ? await this._clientPromise.catch(() => null) : null
+    this._clientPromise = null
+    if (client?.disconnect) await client.disconnect()
+    else if (client?.quit) await client.quit()
   }
 }
 

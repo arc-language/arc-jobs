@@ -37,15 +37,7 @@ function createQueue(adapter) {
     async dead() { return adapter.dead() },
     async replayDead() { return adapter.replayDead() },
     async drain(timeoutMs) { return adapter.drain(timeoutMs) },
-    async cancel(id) {
-      // Mark as cancelled — adapter must support status updates
-      if (adapter._run) {
-        adapter._run(`UPDATE _arc_jobs SET status='cancelled', completed_at=?2 WHERE id=?1`, id, Date.now())
-      } else if (adapter._pending) {
-        const idx = adapter._pending.findIndex(j => j.id === id)
-        if (idx !== -1) adapter._pending.splice(idx, 1)
-      }
-    },
+    async cancel(id) { return adapter.cancel(id) },
 
     // Update job progress (called by job.progress() inside @progress jobs)
     async updateProgress(id, pct, meta = {}) {

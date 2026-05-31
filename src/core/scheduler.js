@@ -11,7 +11,9 @@ function cronMatches(expr, d) {
   const check = (field, val) => {
     if (field === '*') return true
     if (field.includes('/')) {
-      const [, step] = field.split('/'); return val % +step === 0
+      const [base, step] = field.split('/')
+      const start = base === '*' ? 0 : +base
+      return val >= start && (val - start) % +step === 0
     }
     if (field.includes(',')) return field.split(',').map(Number).includes(val)
     if (field.includes('-')) {
@@ -29,8 +31,8 @@ function nextFireTime(expr) {
   const next = new Date(now)
   next.setSeconds(0, 0)
   next.setMinutes(next.getMinutes() + 1)
-  // Walk forward up to 1 year to find next match
-  for (let i = 0; i < 525960; i++) {
+  // Walk forward up to 1 week (10080 min) — avoids blocking event loop on pathological expressions
+  for (let i = 0; i < 10080; i++) {
     if (cronMatches(expr, next)) return next
     next.setMinutes(next.getMinutes() + 1)
   }
@@ -38,12 +40,13 @@ function nextFireTime(expr) {
 }
 
 function startScheduler(schedules, queues) {
-  let lastMin = -1
+  // Deduplicate by minute using a composite key so polling faster than 1/min doesn't double-fire
+  let lastFiredMin = -1
   return setInterval(() => {
     const now = new Date()
-    const thisMin = now.getMinutes()
-    if (thisMin === lastMin) return
-    lastMin = thisMin
+    const minKey = Math.floor(now.getTime() / 60000)
+    if (minKey === lastFiredMin) return
+    lastFiredMin = minKey
     for (const { expr, jobName, queueName, args } of schedules) {
       if (cronMatches(expr, now)) {
         const queue = queues[queueName ?? 'default']
@@ -51,11 +54,11 @@ function startScheduler(schedules, queues) {
           queue.enqueue(jobName, args ?? []).catch(e => {
             console.error(JSON.stringify({ ts: now.toISOString(), level: 'error', event: 'schedule_enqueue_failed', job: jobName, error: e?.message }))
           })
-          console.error(JSON.stringify({ ts: now.toISOString(), level: 'info', event: 'schedule_fired', job: jobName, cron: expr }))
+          console.log(JSON.stringify({ ts: now.toISOString(), level: 'info', event: 'schedule_fired', job: jobName, cron: expr }))
         }
       }
     }
-  }, 30000)
+  }, 10000)
 }
 
 module.exports = { cronMatches, nextFireTime, startScheduler }

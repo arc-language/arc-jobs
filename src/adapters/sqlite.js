@@ -151,6 +151,21 @@ class SqliteAdapter extends BaseAdapter {
     this._run(`UPDATE _arc_jobs SET progress = ?2 WHERE id = ?1`, id, Math.min(100, Math.max(0, pct)))
   }
 
+  async cancel(id) {
+    this._run(
+      `UPDATE _arc_jobs SET status = 'cancelled', completed_at = ?2 WHERE id = ?1 AND status IN ('pending','running')`,
+      id, Date.now()
+    )
+  }
+
+  async replayOne(id) {
+    this._run(
+      `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE id = ?1 AND status = 'failed'`,
+      id, Date.now()
+    )
+    if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+  }
+
   async status(id) {
     const row = this._get(`SELECT id, name, status, progress, error, created_at, started_at, completed_at FROM _arc_jobs WHERE id = ?1`, id)
     return row ?? { id, status: 'unknown' }

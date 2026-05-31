@@ -21,6 +21,8 @@ class BaseAdapter {
   async complete(id) { throw new Error('not implemented') }
   async fail(id, error, attempts, maxAttempts) { throw new Error('not implemented') }
   async updateProgress(id, pct) {}                             // optional: override for persistence
+  async cancel(id) { throw new Error('not implemented') }
+  async replayOne(id) { throw new Error('not implemented') }
   async status(id) { throw new Error('not implemented') }
   async size() { throw new Error('not implemented') }
   async dead() { throw new Error('not implemented') }

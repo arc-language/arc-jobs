@@ -8,7 +8,20 @@ const { nextFireTime } = require('../core/scheduler')
 
 // ── SSE broadcaster ─────────────────────────────────────────────────────────
 
-const _sseClients = new Set()  // { controller: ReadableStreamDefaultController }
+const _sseClients = new Set()  // ReadableStreamDefaultController
+let _sseBroadcastInterval = null
+let _sseBroadcastQueues = null
+
+function _ensureSharedBroadcast(queues) {
+  _sseBroadcastQueues = queues
+  if (_sseBroadcastInterval) return
+  _sseBroadcastInterval = setInterval(async () => {
+    if (_sseClients.size === 0) return
+    const stats = await _collectStats(_sseBroadcastQueues).catch(() => ({}))
+    const q0 = Object.values(stats)[0] ?? {}
+    _sseSend({ type: 'tick', ...q0 })
+  }, 2000)
+}
 
 function _sseSend(data) {
   const msg = `data: ${JSON.stringify(data)}\n\n`
@@ -112,13 +125,16 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
   .top-bar h2 { font-size: 18px; font-weight: 600 }
   .refresh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; animation: pulse 2s infinite }
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+  @media (prefers-reduced-motion: reduce) { .refresh-dot { animation: none } }
   .status-bar { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px }
 
   /* Sections */
   .section-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; margin-top: 24px }
 
   /* Modal-ish error toast */
-  #toast { position: fixed; bottom: 24px; right: 24px; background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; pointer-events: none }
+  #toast { position: fixed; bottom: 24px; right: 24px; background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; display: flex; align-items: center; gap: 10px }
+  #toast-dismiss { background: none; border: none; color: #fff; font-size: 16px; cursor: pointer; padding: 0; line-height: 1; opacity: .8 }
+  #toast-dismiss:hover { opacity: 1 }
 </style>
 </head>
 <body>
@@ -137,7 +153,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="page active" id="page-overview">
       <div class="top-bar">
         <h2>Overview</h2>
-        <div class="status-bar"><span class="refresh-dot"></span> live · 2s refresh</div>
+        <div class="status-bar"><span class="refresh-dot" aria-hidden="true"></span> live · 2s refresh</div>
       </div>
       <div id="queue-tabs" class="tab-bar"></div>
       <div class="stats" id="stats-row">
@@ -150,10 +166,10 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
 
     <!-- Active Jobs -->
     <div class="page" id="page-jobs">
-      <div class="top-bar"><h2>Active Jobs</h2><div class="status-bar"><span class="refresh-dot"></span> live</div></div>
+      <div class="top-bar"><h2>Active Jobs</h2><div class="status-bar"><span class="refresh-dot" aria-hidden="true"></span> live</div></div>
       <div id="queue-tabs-jobs" class="tab-bar"></div>
       <table id="jobs-table">
-        <thead><tr><th>Job</th><th>Args</th><th>Priority</th><th>Status</th><th>Progress</th><th>Age</th><th></th></tr></thead>
+        <thead><tr><th scope="col">Job</th><th scope="col">Args</th><th scope="col">Priority</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Age</th><th scope="col"></th></tr></thead>
         <tbody id="jobs-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
@@ -162,7 +178,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="page" id="page-schedules">
       <div class="top-bar"><h2>Schedules</h2></div>
       <table id="sched-table">
-        <thead><tr><th>Job</th><th>Cron</th><th>Queue</th><th>Next Fire</th></tr></thead>
+        <thead><tr><th scope="col">Job</th><th scope="col">Cron</th><th scope="col">Queue</th><th scope="col">Next Fire</th></tr></thead>
         <tbody id="sched-body"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
@@ -171,7 +187,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="page" id="page-locks">
       <div class="top-bar"><h2>Active @unique Locks</h2></div>
       <table id="locks-table">
-        <thead><tr><th>Key</th><th>TTL Remaining</th><th></th></tr></thead>
+        <thead><tr><th scope="col">Key</th><th scope="col">TTL Remaining</th><th scope="col"></th></tr></thead>
         <tbody id="locks-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
@@ -184,14 +200,14 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
       <div id="queue-tabs-dlq" class="tab-bar"></div>
       <table id="dlq-table">
-        <thead><tr><th>Job</th><th>Args</th><th>Error</th><th>Failed At</th><th></th></tr></thead>
+        <thead><tr><th scope="col">Job</th><th scope="col">Args</th><th scope="col">Error</th><th scope="col">Failed At</th><th scope="col"></th></tr></thead>
         <tbody id="dlq-body"><tr><td colspan="5" class="empty">No failed jobs</td></tr></tbody>
       </table>
     </div>
 
   </main>
 </div>
-<div id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
+<div id="toast" role="alert" aria-live="assertive" aria-atomic="true" style="display:none"><span id="toast-msg"></span><button id="toast-dismiss" onclick="document.getElementById('toast').style.display='none'" aria-label="Dismiss notification">×</button></div>
 
 <script>
 const BASE = '/_arc/jobs'
@@ -225,10 +241,10 @@ function age(ms) {
 }
 function toast(msg, isErr = true) {
   const el = document.getElementById('toast')
-  el.textContent = msg
+  document.getElementById('toast-msg').textContent = msg
   el.style.background = isErr ? 'var(--red)' : 'var(--green)'
-  el.style.display = 'block'
-  setTimeout(() => el.style.display = 'none', 3000)
+  el.style.display = 'flex'
+  setTimeout(() => el.style.display = 'none', 5000)
 }
 function renderTabs(containerId, onSelect) {
   const bar = document.getElementById(containerId)
@@ -271,20 +287,25 @@ async function refresh() {
   renderTabs('queue-tabs', loadOverview)
   renderTabs('queue-tabs-jobs', loadJobs)
   renderTabs('queue-tabs-dlq', loadDlq)
-  if (_activePage === 'overview') loadOverview(_activeQueue ?? _queues[0])
-  if (_activePage === 'jobs')     loadJobs(_activeQueue ?? _queues[0])
+  const activeQ = _activeQueue ?? _queues[0]
+  if (_activePage === 'overview') _renderOverviewData(data.queues.find(q => q.name === activeQ))
+  if (_activePage === 'jobs')     loadJobs(activeQ)
   if (_activePage === 'schedules') loadSchedules()
   if (_activePage === 'locks')    loadLocks()
-  if (_activePage === 'dlq')      loadDlq(_activeQueue ?? _queues[0])
+  if (_activePage === 'dlq')      loadDlq(activeQ)
 }
 
-async function loadOverview(qName) {
-  const q = (await api('/api/overview'))?.queues?.find(x => x.name === qName)
+function _renderOverviewData(q) {
   if (!q) return
   document.getElementById('stat-pending').textContent   = q.pending
   document.getElementById('stat-running').textContent   = q.running
   document.getElementById('stat-completed').textContent = q.completed
   document.getElementById('stat-failed').textContent    = q.failed
+}
+
+async function loadOverview(qName) {
+  const data = await api('/api/overview')
+  _renderOverviewData(data?.queues?.find(x => x.name === qName))
 }
 
 async function loadJobs(qName) {
@@ -302,7 +323,7 @@ async function loadJobs(qName) {
       '<td>' + badge(j.status, j.status) + '</td>' +
       '<td>' + prog + '</td>' +
       '<td>' + (j.started_at ? age(j.started_at) : '–') + '</td>' +
-      '<td><button class="btn btn-danger" onclick="cancelJob(\'' + j.id + '\')">Cancel</button></td>' +
+      '<td><button class="btn btn-danger" onclick="cancelJob(' + JSON.stringify(j.id) + ')">Cancel</button></td>' +
       '</tr>'
   }).join('')
 }
@@ -345,7 +366,7 @@ async function loadDlq(qName) {
     '<td><span class="mono">' + esc(JSON.stringify(j.args ?? [])) + '</span></td>' +
     '<td style="color:var(--red);max-width:240px;overflow:hidden;text-overflow:ellipsis">' + esc(j.error ?? '') + '</td>' +
     '<td class="mono">' + (j.failedAt ? new Date(j.failedAt).toLocaleString() : '–') + '</td>' +
-    '<td><button class="btn" onclick="replayJob(\'' + j.id + '\')">Replay</button></td>' +
+    '<td><button class="btn" onclick="replayJob(' + JSON.stringify(j.id) + ')">Replay</button></td>' +
     '</tr>'
   ).join('')
 }
@@ -353,28 +374,27 @@ async function loadDlq(qName) {
 // ── Actions ──────────────────────────────────────────────────────────────────
 
 async function cancelJob(id) {
-  await api('/api/jobs/' + id + '/cancel', { method: 'POST' })
-  toast('Job cancelled', false)
-  setTimeout(refresh, 200)
+  if (!confirm('Cancel this job? This cannot be undone.')) return
+  const res = await api('/api/jobs/' + id + '/cancel', { method: 'POST' })
+  if (res) { toast('Job cancelled', false); setTimeout(refresh, 200) }
 }
 
 async function replayJob(id) {
-  await api('/api/dlq/' + id + '/replay', { method: 'POST' })
-  toast('Job replayed', false)
-  setTimeout(refresh, 200)
+  const res = await api('/api/dlq/' + id + '/replay', { method: 'POST' })
+  if (res) { toast('Job replayed', false); setTimeout(refresh, 200) }
 }
 
 async function replayAll() {
+  if (!confirm('Replay ALL dead jobs? This will re-enqueue every failed job.')) return
   const q = _activeQueue ?? _queues[0] ?? ''
-  await api('/api/dlq/replay?queue=' + q, { method: 'POST' })
-  toast('All dead jobs replayed', false)
-  setTimeout(refresh, 300)
+  const res = await api('/api/dlq/replay?queue=' + q, { method: 'POST' })
+  if (res) { toast('All dead jobs replayed', false); setTimeout(refresh, 300) }
 }
 
 async function unlockKey(key) {
-  await api('/api/locks/' + encodeURIComponent(key), { method: 'DELETE' })
-  toast('Lock released', false)
-  setTimeout(loadLocks, 200)
+  if (!confirm('Force-release lock "' + key + '"? The job holding it may misbehave.')) return
+  const res = await api('/api/locks/' + encodeURIComponent(key), { method: 'DELETE' })
+  if (res) { toast('Lock released', false); setTimeout(loadLocks, 200) }
 }
 
 // ── SSE live updates ─────────────────────────────────────────────────────────
@@ -441,7 +461,7 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   const method = req.method.toUpperCase()
 
   // ── Auth check (skip for SSE progress — job owner polls their own job) ──
-  if (sub !== '/api/jobs' || !sub.match(/^\/api\/jobs\/[^/]+\/progress$/)) {
+  if (!sub.match(/^\/api\/jobs\/[^/]+\/progress$/)) {
     const ok = await _checkAuth(req, opts.auth)
     if (!ok) {
       if (sub === '/' || sub === '') {
@@ -460,25 +480,19 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
 
   // ── SSE stream (all queues, ~2s tick) ──
   if (sub === '/events') {
+    _ensureSharedBroadcast(queues)
+    let _sseCtrl
     const stream = new ReadableStream({
       start(controller) {
+        _sseCtrl = controller
         _sseClients.add(controller)
-        const iv = setInterval(async () => {
-          const stats = await _collectStats(queues)
-          const q0 = Object.values(stats)[0] ?? {}
-          try {
-            controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...q0 })}\n\n`)
-          } catch (_) {
-            clearInterval(iv)
-            _sseClients.delete(controller)
-          }
-        }, 2000)
-        // Send initial tick immediately
+        // Send initial tick immediately on connect
         _collectStats(queues).then(stats => {
           const q0 = Object.values(stats)[0] ?? {}
           try { controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...q0 })}\n\n`) } catch (_) {}
-        })
+        }).catch(() => {})
       },
+      cancel() { _sseClients.delete(_sseCtrl) },
     })
     return new Response(stream, {
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
@@ -570,24 +584,7 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   if (dlqReplayMatch && method === 'POST') {
     const id = dlqReplayMatch[1]
     for (const q of Object.values(queues)) {
-      try {
-        const adapter = q._adapter
-        if (adapter._run) {
-          adapter._run(
-            `UPDATE _arc_jobs SET status='pending', attempts=0, error=NULL, scheduled_at=?2 WHERE id=?1`,
-            id, Date.now()
-          )
-          if (adapter._registry) setTimeout(() => adapter.tryProcess(adapter._registry), 0)
-          break
-        } else if (adapter._dead) {
-          const idx = adapter._dead.findIndex(j => j.id === id)
-          if (idx !== -1) {
-            const [job] = adapter._dead.splice(idx, 1)
-            await adapter.enqueue(job.name, job.args ?? [])
-            break
-          }
-        }
-      } catch (_) {}
+      try { await q._adapter.replayOne(id); break } catch (_) {}
     }
     return _json({ ok: true })
   }
