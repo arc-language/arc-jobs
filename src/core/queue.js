@@ -11,13 +11,11 @@ function createQueue(adapter) {
     _adapter: adapter,
     _registry: registry,
 
-    // Register a job handler (called from emitted server.js)
     register(name, fn, opts = {}) {
       registry[name] = { fn, ...opts }
       adapter._registry = registry
     },
 
-    // Enqueue a job
     async enqueue(name, args, opts = {}) {
       return adapter.enqueue(name, args, opts)
     },
@@ -31,7 +29,6 @@ function createQueue(adapter) {
       return adapter.releaseLock(key)
     },
 
-    // Public API
     async status(id) { return adapter.status(id) },
     async size() { return adapter.size() },
     async dead() { return adapter.dead() },

@@ -17,6 +17,8 @@ class RedisAdapter extends BaseAdapter {
     this._pollTimer = null
   }
 
+  get _dlqKey() { return `arc:jobs:${this.name}:dlq` }
+
   _getClient() {
     if (!this._clientPromise) this._clientPromise = this._connect()
     return this._clientPromise
@@ -44,7 +46,6 @@ class RedisAdapter extends BaseAdapter {
       const score = opts.at ? +opts.at : Date.now() + opts.delayMs
       await r.zadd(this._delayedKey, score, payload)
     } else {
-      // Higher priority = higher score = dequeued first
       await r.zadd(this._queueKey, priority, payload)
     }
     await r.hset(this._metaPrefix + id, meta)
@@ -53,9 +54,7 @@ class RedisAdapter extends BaseAdapter {
 
   async dequeue() {
     const r = await this._getClient()
-    // Move ready delayed jobs first
     await this._promoteDelayed(r)
-    // ZPOPMAX: highest score = highest priority
     const result = await r.zpopmax(this._queueKey, 1)
     if (!result || result.length === 0) return null
     const payload = Array.isArray(result) ? result[0] : result
@@ -98,9 +97,10 @@ class RedisAdapter extends BaseAdapter {
     const meta = await r.hgetall(this._metaPrefix + id)
     let metaArgs
     try { metaArgs = JSON.parse(meta?.args ?? '[]') } catch (_) { metaArgs = [] }
+    const dlqEntry = JSON.stringify({ id, name: meta?.name, args: metaArgs, error, failedAt: new Date().toISOString() })
     if (attempts >= maxAttempts) {
       await r.hset(this._metaPrefix + id, { status: 'failed', error, attempts, completedAt: Date.now() })
-      await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, name: meta?.name, args: metaArgs, error, failedAt: new Date().toISOString() }))
+      await r.lpush(this._dlqKey, dlqEntry)
     } else {
       const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
       if (meta?.name) {
@@ -109,7 +109,7 @@ class RedisAdapter extends BaseAdapter {
         await r.hset(this._metaPrefix + id, { status: 'pending', attempts, error })
       } else {
         // Metadata expired — push to DLQ rather than silently dropping the retry
-        await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, name: meta?.name, args: metaArgs, error, failedAt: new Date().toISOString() }))
+        await r.lpush(this._dlqKey, dlqEntry)
       }
     }
   }
@@ -122,14 +122,13 @@ class RedisAdapter extends BaseAdapter {
 
   async replayOne(id) {
     const r = await this._getClient()
-    const dlqKey = `arc:jobs:${this.name}:dlq`
-    const items = await r.lrange(dlqKey, 0, -1)
+    const items = await r.lrange(this._dlqKey, 0, -1)
     for (const item of items) {
       let job
       try { job = JSON.parse(item) } catch (_) { continue }
       if (job?.id === id && job?.name) {
         await this.enqueue(job.name, job.args ?? [])
-        await r.lrem(dlqKey, 1, item)
+        await r.lrem(this._dlqKey, 1, item)
         console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_one', id, job: job.name }))
         return true
       }
@@ -151,17 +150,16 @@ class RedisAdapter extends BaseAdapter {
 
   async dead() {
     const r = await this._getClient()
-    const items = await r.lrange(`arc:jobs:${this.name}:dlq`, 0, 99)
+    const items = await r.lrange(this._dlqKey, 0, 99)
     return items.flatMap(i => { try { return [JSON.parse(i)] } catch (_) { return [] } })
   }
 
   async replayDead() {
     const r = await this._getClient()
-    const key = `arc:jobs:${this.name}:dlq`
     // RENAME atomically grabs the list — concurrent fail() pushes after this point land on the
     // original key and are not lost; this tmp key is ours alone to drain.
-    const tmpKey = `${key}:replay:${Date.now()}`
-    try { await r.rename(key, tmpKey) } catch (_) { return 0 }  // key didn't exist
+    const tmpKey = `${this._dlqKey}:replay:${Date.now()}`
+    try { await r.rename(this._dlqKey, tmpKey) } catch (_) { return 0 }  // key didn't exist
     const items = await r.lrange(tmpKey, 0, -1)
     await r.del(tmpKey)
     let count = 0

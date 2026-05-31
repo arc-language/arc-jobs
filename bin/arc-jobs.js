@@ -23,7 +23,7 @@ switch (cmd) {
     require('../src/cli/init')(args)
     break
   default:
-    console.log(`arc-jobs — background jobs for Arc (https://arc-language.dev)
+    console.log(`arc-jobs - background jobs for Arc (https://arc-language.dev)
 
 Usage: arc-jobs <command> [options]
 

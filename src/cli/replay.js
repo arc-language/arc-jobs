@@ -34,7 +34,7 @@ module.exports = async function replay(args) {
   let replayed = 0
   for (const job of dead) {
     run(`UPDATE _arc_jobs SET status='pending', attempts=0, error=NULL, scheduled_at=?2 WHERE id=?1`, job.id, Date.now())
-    console.log(`  ✓ ${job.name} (${job.id.slice(0, 8)}…)  — was: ${job.error?.slice(0, 60) ?? 'unknown error'}`)
+    console.log(`  ✓ ${job.name} (${job.id.slice(0, 8)}…)  - was: ${job.error?.slice(0, 60) ?? 'unknown error'}`)
     replayed++
   }
   console.log(`\nReplayed ${replayed} job(s). Start your server to process them.`)

@@ -75,7 +75,6 @@ class MemoryAdapter extends BaseAdapter {
       if (this._dead.length > 1000) this._dead.splice(0, this._dead.length - 1000)
       this._statusMap.set(id, 'failed')
     } else {
-      // Re-schedule for retry with exponential backoff
       const delay = 1000 * 2 ** (attempts - 1) + Math.random() * 500
       const retryJob = { ...(original ?? {}), id, attempts, scheduledAt: Date.now() + Math.round(delay) }
       _insertSorted(this._pending, retryJob)

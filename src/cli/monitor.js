@@ -33,7 +33,7 @@ module.exports = async function monitor(args) {
   function render() {
     clear()
     const now = new Date().toISOString()
-    console.log(cyan('arc-jobs monitor') + dim(` — ${now} — Ctrl+C to exit\n`))
+    console.log(cyan('arc-jobs monitor') + dim(` - ${now} - Ctrl+C to exit\n`))
 
     const stats = query(`
       SELECT queue,

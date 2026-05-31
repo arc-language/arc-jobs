@@ -37,11 +37,11 @@ class SqliteAdapter extends BaseAdapter {
   constructor(opts = {}) {
     super(opts)
     this._db = opts.db ?? _openDb(opts.path ?? 'app.db')
+    this._isBun = !!this._db.run
     this._queueName = opts.name ?? 'default'
     this._pollTimer = null
-    // Create table on first use
     for (const stmt of _DDL.split(';').map(s => s.trim()).filter(Boolean)) {
-      this._db.run ? this._db.run(stmt) : this._db.prepare(stmt).run()
+      this._isBun ? this._db.run(stmt) : this._db.prepare(stmt).run()
     }
   }
 
@@ -53,18 +53,17 @@ class SqliteAdapter extends BaseAdapter {
   }
 
   _run(sql, ...params) {
-    // Bun:sqlite uses .run(), better-sqlite3 uses .prepare().run()
-    if (this._db.run) return this._db.run(sql, ...params)
+    if (this._isBun) return this._db.run(sql, ...params)
     return this._stmt(sql).run(...params)
   }
 
   _get(sql, ...params) {
-    if (this._db.query) return this._db.query(sql).get(...params)
+    if (this._isBun) return this._db.query(sql).get(...params)
     return this._stmt(sql).get(...params)
   }
 
   _all(sql, ...params) {
-    if (this._db.query) return this._db.query(sql).all(...params)
+    if (this._isBun) return this._db.query(sql).all(...params)
     return this._stmt(sql).all(...params)
   }
 
@@ -98,7 +97,6 @@ class SqliteAdapter extends BaseAdapter {
   }
 
   async dequeue() {
-    // Atomic claim: UPDATE ... WHERE status='pending' ensures no double-processing
     const row = this._get(
       `SELECT id, name, args, attempts, max_attempts
        FROM _arc_jobs

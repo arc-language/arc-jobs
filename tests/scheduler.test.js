@@ -87,7 +87,7 @@ describe('nextFireTime', () => {
     assert.ok(next > new Date())
   })
 
-  test('next fire time is in the future', () => {
+  test('returns a future Date for a different cron pattern (30 14 * * *)', () => {
     const next = nextFireTime('30 14 * * *')
     assert.ok(next > new Date())
   })

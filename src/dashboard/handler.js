@@ -18,8 +18,8 @@ function _ensureSharedBroadcast(queues) {
   _sseBroadcastInterval = setInterval(async () => {
     if (_sseClients.size === 0) return
     const stats = await _collectStats(_sseBroadcastQueues).catch(() => ({}))
-    const q0 = Object.values(stats)[0] ?? {}
-    _sseSend({ type: 'tick', ...q0 })
+    const firstQueueStats = Object.values(stats)[0] ?? {}
+    _sseSend({ type: 'tick', ...firstQueueStats })
   }, 2000)
 }
 
@@ -520,8 +520,8 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
         _sseClients.add(controller)
         // Send initial tick immediately on connect
         _collectStats(queues).then(stats => {
-          const q0 = Object.values(stats)[0] ?? {}
-          try { controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...q0 })}\n\n`) } catch (_) {}
+          const firstQueueStats = Object.values(stats)[0] ?? {}
+          try { controller.enqueue(`data: ${JSON.stringify({ type: 'tick', ...firstQueueStats })}\n\n`) } catch (_) {}
         }).catch(() => {})
       },
       cancel() { _sseClients.delete(_sseCtrl) },
@@ -650,7 +650,7 @@ async function _collectStats(queues) {
     const adapter = q._adapter
     try {
       if (adapter._all) {
-        // SQLite: query counts directly
+        // _all is only present on SqliteAdapter
         const rows = adapter._all(
           `SELECT status, COUNT(*) as c FROM _arc_jobs WHERE queue=?1 GROUP BY status`,
           name
