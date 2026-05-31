@@ -79,6 +79,8 @@ export interface QueueAdapter {
  * ```
  */
 export interface Queue {
+  /** Register a handler function for a named job. Call once at startup before `start()`. */
+  register(name: string, fn: (...args: unknown[]) => Promise<void>, opts?: Partial<JobRegistryEntry>): void
   /** Enqueue a job by name with the given args. Returns the job ID. */
   enqueue(name: string, args: unknown[], opts?: EnqueueOptions): Promise<string>
   /** Acquire an `@unique` lock for the given key and TTL. */
