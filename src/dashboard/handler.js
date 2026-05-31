@@ -40,7 +40,7 @@ function broadcastProgress(jobId, pct, meta = {}) {
     for (const c of listeners) {
       try { c.enqueue(msg) } catch (_) { listeners.delete(c) }
     }
-    if (pct >= 100) _progressListeners.delete(jobId)
+    if (pct >= 100 || listeners.size === 0) _progressListeners.delete(jobId)
   }
 }
 
@@ -275,15 +275,18 @@ function renderTabs(containerId, onSelect) {
     })
     bar.appendChild(t)
   })
-  bar.addEventListener('keydown', e => {
-    const tabs = [...bar.querySelectorAll('.tab')]
-    const idx = tabs.indexOf(document.activeElement)
-    if (idx === -1) return
-    if (e.key === 'ArrowRight') { e.preventDefault(); tabs[(idx + 1) % tabs.length].focus() }
-    if (e.key === 'ArrowLeft')  { e.preventDefault(); tabs[(idx - 1 + tabs.length) % tabs.length].focus() }
-    if (e.key === 'Home')       { e.preventDefault(); tabs[0].focus() }
-    if (e.key === 'End')        { e.preventDefault(); tabs[tabs.length - 1].focus() }
-  })
+  if (!bar._arcTabsKeydown) {
+    bar.addEventListener('keydown', e => {
+      const tabs = [...bar.querySelectorAll('.tab')]
+      const idx = tabs.indexOf(document.activeElement)
+      if (idx === -1) return
+      if (e.key === 'ArrowRight') { e.preventDefault(); tabs[(idx + 1) % tabs.length].focus() }
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); tabs[(idx - 1 + tabs.length) % tabs.length].focus() }
+      if (e.key === 'Home')       { e.preventDefault(); tabs[0].focus() }
+      if (e.key === 'End')        { e.preventDefault(); tabs[tabs.length - 1].focus() }
+    })
+    bar._arcTabsKeydown = true
+  }
   if (!_activeQueue) _activeQueue = _queues[0]
 }
 
@@ -383,7 +386,7 @@ async function loadDlq(qName) {
     '<td><span class="mono">' + esc(j.name) + '</span></td>' +
     '<td><span class="mono">' + esc(JSON.stringify(j.args ?? [])) + '</span></td>' +
     '<td style="color:var(--red);max-width:240px;overflow:hidden;text-overflow:ellipsis">' + esc(j.error ?? '') + '</td>' +
-    '<td class="mono">' + (j.failedAt ? new Date(j.failedAt).toLocaleString() : '–') + '</td>' +
+    '<td class="mono">' + esc(j.failedAt ? new Date(j.failedAt).toLocaleString() : '–') + '</td>' +
     '<td><button class="btn" onclick="replayJob(' + JSON.stringify(j.id) + ')">Replay</button></td>' +
     '</tr>'
   ).join('')
@@ -417,9 +420,12 @@ async function unlockKey(key) {
 
 // ── SSE live updates ─────────────────────────────────────────────────────────
 
+let _sseConnected = false
+
 function connectSSE() {
   const es = new EventSource(BASE + '/events')
   es.onmessage = e => {
+    _sseConnected = true
     try {
       const d = JSON.parse(e.data)
       if (d.type === 'tick') {
@@ -430,14 +436,15 @@ function connectSSE() {
       }
     } catch (_) {}
   }
-  es.onerror = () => setTimeout(connectSSE, 3000)
+  es.onerror = () => { _sseConnected = false; setTimeout(connectSSE, 3000) }
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
 refresh()
 connectSSE()
-setInterval(refresh, 2000)
+// Only poll when SSE is disconnected — SSE tick covers live stats when healthy
+setInterval(() => { if (!_sseConnected) refresh() }, 2000)
 </script>
 </body>
 </html>`
@@ -688,7 +695,10 @@ async function _listActiveJobs(adapter) {
         priority: _scoreToPriority(r.priority),
       }))
     } else if (adapter._pending) {
-      return [...adapter._pending, ...[...( adapter._inFlight ?? new Map() ).entries()].map(([id, v]) => ({ id, ...v, status: 'running' }))]
+      return [
+        ...adapter._pending.map(j => ({ ...j, status: 'pending', priority: _scoreToPriority(j.priority) })),
+        ...[...(adapter._inFlight ?? new Map()).entries()].map(([id, v]) => ({ id, ...v, status: 'running', priority: _scoreToPriority(v.priority ?? 5) })),
+      ]
     }
   } catch (_) {}
   return []

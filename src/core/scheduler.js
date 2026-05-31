@@ -52,10 +52,13 @@ function startScheduler(schedules, queues) {
         lastFiredMin.set(schedKey, minKey)
         const queue = queues[queueName ?? 'default']
         if (queue) {
-          queue.enqueue(jobName, args ?? []).catch(e => {
+          try {
+            queue.enqueue(jobName, args ?? [])
+              .then(() => console.log(JSON.stringify({ ts: now.toISOString(), level: 'info', event: 'schedule_fired', job: jobName, cron: expr })))
+              .catch(e => console.error(JSON.stringify({ ts: now.toISOString(), level: 'error', event: 'schedule_enqueue_failed', job: jobName, error: e?.message })))
+          } catch (e) {
             console.error(JSON.stringify({ ts: now.toISOString(), level: 'error', event: 'schedule_enqueue_failed', job: jobName, error: e?.message }))
-          })
-          console.log(JSON.stringify({ ts: now.toISOString(), level: 'info', event: 'schedule_fired', job: jobName, cron: expr }))
+          }
         } else {
           console.warn(JSON.stringify({ ts: now.toISOString(), level: 'warn', event: 'schedule_no_queue', job: jobName, queue: queueName ?? 'default', msg: 'queue not found — job will not fire' }))
         }

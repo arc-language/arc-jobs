@@ -45,7 +45,7 @@ module.exports = async function stats(args) {
       console.log(r.queue.padEnd(20) + String(r.pending).padEnd(10) + String(r.running).padEnd(10) + String(r.completed).padEnd(12) + String(r.failed))
     }
     console.log()
-  } catch (e) {
+  } catch (_e) {
     console.error('arc-jobs stats: _arc_jobs table not found. Run your server first to create it.')
   }
 }

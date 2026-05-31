@@ -23,7 +23,6 @@ class MemoryAdapter extends BaseAdapter {
     this._pending = []     // { id, name, args, priority, attempts, maxAttempts, scheduledAt }
     this._inFlight = new Map()  // id → { name, args } for jobs currently running
     this._completed = []
-    this._failed = []
     this._dead = []
     this._locks = new Map()  // key → expiresAt
     this._statusMap = new Map()  // id → status string for O(1) status lookups
@@ -106,6 +105,7 @@ class MemoryAdapter extends BaseAdapter {
     }
     this._dead = toKeep
     for (const job of toReplay) await this.enqueue(job.name, job.args ?? [])
+    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_dead', count: toReplay.length }))
     return toReplay.length
   }
 
@@ -121,6 +121,8 @@ class MemoryAdapter extends BaseAdapter {
     if (idx === -1) return false
     const [job] = this._dead.splice(idx, 1)
     await this.enqueue(job.name, job.args ?? [])
+    this._statusMap.delete(id)  // old id status cleared; new enqueue assigns a fresh id
+    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_one', id, job: job.name }))
     return true
   }
 
@@ -154,16 +156,18 @@ class MemoryAdapter extends BaseAdapter {
     if (!this._registry) throw new Error('arc-jobs: flush() called before registry was set')
     const saved = this._testMode
     this._testMode = false
-    await this.tryProcess(this._registry)
-    await this.drain(60000)
-    this._testMode = saved
+    try {
+      await this.tryProcess(this._registry)
+      await this.drain(60000)
+    } finally {
+      this._testMode = saved
+    }
   }
 
   reset() {
     this._pending = []
     this._inFlight = new Map()
     this._completed = []
-    this._failed = []
     this._dead = []
     this._locks = new Map()
     this._statusMap = new Map()

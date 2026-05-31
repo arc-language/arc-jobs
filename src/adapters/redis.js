@@ -74,8 +74,14 @@ class RedisAdapter extends BaseAdapter {
     for (const payload of ready) {
       let job
       try { job = JSON.parse(payload) } catch (_) { continue }
-      await r.zrem(this._delayedKey, payload)
-      await r.zadd(this._queueKey, job.priority ?? 5, payload)
+      try {
+        await r.zrem(this._delayedKey, payload)
+        await r.zadd(this._queueKey, job.priority ?? 5, payload)
+      } catch (e) {
+        // Best-effort restore to delayed set to avoid silent job loss
+        try { await r.zadd(this._delayedKey, job.scheduledAt ?? Date.now() + 60000, payload) } catch (_) {}
+        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, event: 'promote_delayed_failed', error: e?.message ?? String(e) }))
+      }
     }
   }
 
@@ -88,21 +94,22 @@ class RedisAdapter extends BaseAdapter {
 
   async fail(id, error, attempts, maxAttempts) {
     const r = await this._getClient()
+    // Fetch metadata upfront — needed for both retry payload and DLQ entry (name+args)
+    const meta = await r.hgetall(this._metaPrefix + id)
+    let metaArgs
+    try { metaArgs = JSON.parse(meta?.args ?? '[]') } catch (_) { metaArgs = [] }
     if (attempts >= maxAttempts) {
       await r.hset(this._metaPrefix + id, { status: 'failed', error, attempts, completedAt: Date.now() })
-      await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, error, failedAt: new Date().toISOString() }))
+      await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, name: meta?.name, args: metaArgs, error, failedAt: new Date().toISOString() }))
     } else {
       const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
-      const existing = await r.hgetall(this._metaPrefix + id)
-      if (existing?.name) {
-        let args
-        try { args = JSON.parse(existing.args ?? '[]') } catch (_) { args = [] }
-        const payload = JSON.stringify({ id, name: existing.name, args, priority: +(existing.priority ?? 5), attempts, maxAttempts })
+      if (meta?.name) {
+        const payload = JSON.stringify({ id, name: meta.name, args: metaArgs, priority: +(meta.priority ?? 5), attempts, maxAttempts })
         await r.zadd(this._delayedKey, Date.now() + delay, payload)
         await r.hset(this._metaPrefix + id, { status: 'pending', attempts, error })
       } else {
         // Metadata expired — push to DLQ rather than silently dropping the retry
-        await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, error, failedAt: new Date().toISOString() }))
+        await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, name: meta?.name, args: metaArgs, error, failedAt: new Date().toISOString() }))
       }
     }
   }
@@ -120,9 +127,10 @@ class RedisAdapter extends BaseAdapter {
     for (const item of items) {
       let job
       try { job = JSON.parse(item) } catch (_) { continue }
-      if (job?.id === id) {
+      if (job?.id === id && job?.name) {
         await this.enqueue(job.name, job.args ?? [])
         await r.lrem(dlqKey, 1, item)
+        console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_one', id, job: job.name }))
         return true
       }
     }
@@ -151,19 +159,19 @@ class RedisAdapter extends BaseAdapter {
     const r = await this._getClient()
     const key = `arc:jobs:${this.name}:dlq`
     const items = await r.lrange(key, 0, -1)
+    if (!items?.length) return 0
+    // DEL first to avoid O(k²) per-item LREM scans; enqueue survivors after
+    await r.del(key)
     let count = 0
     for (const item of items) {
       let job
-      try { job = JSON.parse(item) } catch (_) {
-        await r.lrem(key, 1, item)
-        continue
-      }
+      try { job = JSON.parse(item) } catch (_) { continue }
       if (job?.name) {
         await this.enqueue(job.name, job.args ?? [])
-        await r.lrem(key, 1, item)
         count++
       }
     }
+    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this.name, event: 'replay_dead', count }))
     return count
   }
 

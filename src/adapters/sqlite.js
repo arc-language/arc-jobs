@@ -171,7 +171,10 @@ class SqliteAdapter extends BaseAdapter {
       id, Date.now()
     )
     const changed = result?.changes ?? result
-    if (changed && this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+    if (changed) {
+      if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+      console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this._queueName, event: 'replay_one', id, found: true }))
+    }
     return !!changed
   }
 
@@ -190,13 +193,19 @@ class SqliteAdapter extends BaseAdapter {
   }
 
   async replayDead() {
-    const count = this._get(`SELECT COUNT(*) as c FROM _arc_jobs WHERE queue = ?1 AND status = 'failed'`, this._queueName)?.c ?? 0
-    if (count === 0) return 0
-    this._run(
-      `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE queue = ?1 AND status = 'failed'`,
-      this._queueName, Date.now()
-    )
-    if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+    const now = Date.now()
+    const _queueName = this._queueName
+    const doReplay = () => {
+      const result = this._run(
+        `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE queue = ?1 AND status = 'failed'`,
+        _queueName, now
+      )
+      return result?.changes ?? result ?? 0
+    }
+    // Use transaction if available (better-sqlite3) to make count + update atomic
+    const count = this._db.transaction ? this._db.transaction(doReplay)() : doReplay()
+    if (count > 0 && this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+    console.log(JSON.stringify({ ts: new Date().toISOString(), level: 'info', queue: this._queueName, event: 'replay_dead', count }))
     return count
   }
 

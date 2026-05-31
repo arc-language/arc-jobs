@@ -16,19 +16,19 @@ class BaseAdapter {
 
   // ── Must override ──────────────────────────────────────────────────────────
 
-  async enqueue(name, args, opts = {}) { throw new Error('not implemented') }
+  async enqueue(_name, _args, _opts = {}) { throw new Error('not implemented') }
   async dequeue() { throw new Error('not implemented') }       // returns Job | null
-  async complete(id) { throw new Error('not implemented') }
-  async fail(id, error, attempts, maxAttempts) { throw new Error('not implemented') }
-  async updateProgress(id, pct) {}                             // optional: override for persistence
-  async cancel(id) { throw new Error('not implemented') }
-  async replayOne(id) { throw new Error('not implemented') }
-  async status(id) { throw new Error('not implemented') }
+  async complete(_id) { throw new Error('not implemented') }
+  async fail(_id, _error, _attempts, _maxAttempts) { throw new Error('not implemented') }
+  async updateProgress(_id, _pct) {}                           // optional: override for persistence
+  async cancel(_id) { throw new Error('not implemented') }
+  async replayOne(_id) { throw new Error('not implemented') }
+  async status(_id) { throw new Error('not implemented') }
   async size() { throw new Error('not implemented') }
   async dead() { throw new Error('not implemented') }
   async replayDead() { throw new Error('not implemented') }
-  async acquireLock(key, ttlMs) { return true }                // optional: override for @unique
-  async releaseLock(key) {}
+  async acquireLock(_key, _ttlMs) { return true }              // optional: override for @unique
+  async releaseLock(_key) {}
 
   // ── Shared processor ──────────────────────────────────────────────────────
 
@@ -49,10 +49,12 @@ class BaseAdapter {
         entry.fn(...(job.args ?? [])),
         new Promise((_, rej) => setTimeout(() => rej(new Error(`job timed out after ${timeoutMs}ms`)), timeoutMs)),
       ])
+      let completeErr = null
       try { await this.complete(job.id) } catch (storErr) {
+        completeErr = storErr
         console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'complete_storage_error', error: storErr?.message ?? String(storErr) }))
       }
-      if (entry.thenJob && registry[entry.thenJob]) {
+      if (!completeErr && entry.thenJob && registry[entry.thenJob]) {
         try {
           await this.enqueue(entry.thenJob, job.args ?? [])
         } catch (e) {
@@ -112,6 +114,7 @@ class BaseAdapter {
         if (n === 0 && this._running === 0) return resolve()
         const timer = setTimeout(() => reject(new Error(`[arc-jobs] drain timed out after ${timeoutMs}ms`)), timeoutMs)
         this._drainResolvers.push(err => { clearTimeout(timer); err ? reject(err) : resolve() })
+        this._maybeDrain()  // close TOCTOU window: re-check in case queue drained between size() and push()
       }
       check()
     })
