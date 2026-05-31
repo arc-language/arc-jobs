@@ -24,7 +24,8 @@
   "scripts": {
     "test": "bun test tests/",
     "test:watch": "bun test --watch tests/",
-    "test:coverage": "bun test --coverage tests/"
+    "test:coverage": "bun test --coverage tests/",
+    "lint": "biome check src/ bin/"
   },
   "keywords": [
     "arc",
@@ -72,5 +73,8 @@
   "optionalDependencies": {
     "ioredis": ">=5.0.0",
     "better-sqlite3": ">=9.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16"
   }
 }

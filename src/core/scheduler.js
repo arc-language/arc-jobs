@@ -40,21 +40,24 @@ function nextFireTime(expr) {
 }
 
 function startScheduler(schedules, queues) {
-  // Deduplicate by minute using a composite key so polling faster than 1/min doesn't double-fire
-  let lastFiredMin = -1
+  // Per-schedule dedup map: composite key → last fired minKey
+  const lastFiredMin = new Map()
   return setInterval(() => {
     const now = new Date()
     const minKey = Math.floor(now.getTime() / 60000)
-    if (minKey === lastFiredMin) return
-    lastFiredMin = minKey
     for (const { expr, jobName, queueName, args } of schedules) {
+      const schedKey = `${jobName}:${queueName ?? 'default'}:${expr}`
+      if (lastFiredMin.get(schedKey) === minKey) continue
       if (cronMatches(expr, now)) {
+        lastFiredMin.set(schedKey, minKey)
         const queue = queues[queueName ?? 'default']
         if (queue) {
           queue.enqueue(jobName, args ?? []).catch(e => {
             console.error(JSON.stringify({ ts: now.toISOString(), level: 'error', event: 'schedule_enqueue_failed', job: jobName, error: e?.message }))
           })
           console.log(JSON.stringify({ ts: now.toISOString(), level: 'info', event: 'schedule_fired', job: jobName, cron: expr }))
+        } else {
+          console.warn(JSON.stringify({ ts: now.toISOString(), level: 'warn', event: 'schedule_no_queue', job: jobName, queue: queueName ?? 'default', msg: 'queue not found — job will not fire' }))
         }
       }
     }

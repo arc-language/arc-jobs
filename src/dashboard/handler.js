@@ -40,6 +40,7 @@ function broadcastProgress(jobId, pct, meta = {}) {
     for (const c of listeners) {
       try { c.enqueue(msg) } catch (_) { listeners.delete(c) }
     }
+    if (pct >= 100) _progressListeners.delete(jobId)
   }
 }
 
@@ -135,9 +136,14 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
   #toast { position: fixed; bottom: 24px; right: 24px; background: var(--red); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 999; display: flex; align-items: center; gap: 10px }
   #toast-dismiss { background: none; border: none; color: #fff; font-size: 16px; cursor: pointer; padding: 0; line-height: 1; opacity: .8 }
   #toast-dismiss:hover { opacity: 1 }
+
+  /* Skip-to-content */
+  .skip-link { position: absolute; top: -48px; left: 0; background: var(--accent); color: #fff; padding: 8px 16px; text-decoration: none; border-radius: 4px; z-index: 1000; font-size: 14px }
+  .skip-link:focus { top: 8px; left: 8px }
 </style>
 </head>
 <body>
+<a href="#main-content" class="skip-link">Skip to main content</a>
 <div class="shell">
   <nav class="sidebar" aria-label="Dashboard navigation">
     <div class="sidebar-logo">arc-jobs</div>
@@ -147,7 +153,7 @@ const _DASHBOARD_HTML = `<!DOCTYPE html>
     <button class="nav-item" data-page="locks">Locks</button>
     <button class="nav-item" data-page="dlq">Dead Letter</button>
   </nav>
-  <main class="main">
+  <main class="main" id="main-content">
 
     <!-- Overview -->
     <div class="page active" id="page-overview">
@@ -257,15 +263,26 @@ function renderTabs(containerId, onSelect) {
     t.className = 'tab' + (i === 0 ? ' active' : '')
     t.setAttribute('role', 'tab')
     t.setAttribute('aria-selected', i === 0 ? 'true' : 'false')
+    t.setAttribute('tabindex', i === 0 ? '0' : '-1')
     t.textContent = q
     t.addEventListener('click', () => {
-      bar.querySelectorAll('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-selected', 'false') })
+      bar.querySelectorAll('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-selected', 'false'); x.setAttribute('tabindex', '-1') })
       t.classList.add('active')
       t.setAttribute('aria-selected', 'true')
+      t.setAttribute('tabindex', '0')
       _activeQueue = q
       onSelect(q)
     })
     bar.appendChild(t)
+  })
+  bar.addEventListener('keydown', e => {
+    const tabs = [...bar.querySelectorAll('.tab')]
+    const idx = tabs.indexOf(document.activeElement)
+    if (idx === -1) return
+    if (e.key === 'ArrowRight') { e.preventDefault(); tabs[(idx + 1) % tabs.length].focus() }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); tabs[(idx - 1 + tabs.length) % tabs.length].focus() }
+    if (e.key === 'Home')       { e.preventDefault(); tabs[0].focus() }
+    if (e.key === 'End')        { e.preventDefault(); tabs[tabs.length - 1].focus() }
   })
   if (!_activeQueue) _activeQueue = _queues[0]
 }
@@ -313,8 +330,9 @@ async function loadJobs(qName) {
   const tbody = document.getElementById('jobs-body')
   if (!data?.jobs?.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No active jobs</td></tr>'; return }
   tbody.innerHTML = data.jobs.map(j => {
-    const prog = j.progress != null
-      ? '<div class="prog-wrap"><div class="prog-fill" style="width:' + Math.min(100, j.progress) + '%"></div></div> ' + Math.round(j.progress) + '%'
+    const pct = j.progress != null ? Math.round(Math.min(100, j.progress)) : null
+    const prog = pct != null
+      ? '<div class="prog-wrap" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Job progress ' + pct + '%"><div class="prog-fill" style="width:' + pct + '%"></div></div> ' + pct + '%'
       : '–'
     return '<tr>' +
       '<td><span class="mono">' + esc(j.name) + '</span></td>' +
@@ -440,6 +458,8 @@ async function _checkAuth(req, auth) {
 
 const _401_HTML = '<!DOCTYPE html><html><head><title>Unauthorized</title></head><body style="font-family:sans-serif;text-align:center;padding:80px;background:#0f1117;color:#e2e8f0"><h2 style="color:#ef4444">401 Unauthorized</h2><p>You must be an admin to access the arc-jobs dashboard.</p></body></html>'
 
+let _startupWarnedUnprotected = false
+
 // ── Request handler ──────────────────────────────────────────────────────────
 
 /**
@@ -452,6 +472,11 @@ const _401_HTML = '<!DOCTYPE html><html><head><title>Unauthorized</title></head>
  *   Falls back to ARC_JOBS_SECRET env var token check if omitted.
  */
 async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
+  if (!_startupWarnedUnprotected && !opts.auth && !process.env.ARC_JOBS_SECRET) {
+    _startupWarnedUnprotected = true
+    console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'jobs_dashboard_unprotected', msg: 'arc-jobs dashboard has no auth configured. Set opts.auth or ARC_JOBS_SECRET env var.' }))
+  }
+
   const url = new URL(req.url)
   const path = url.pathname
 
@@ -583,9 +608,11 @@ async function arcJobsHandle(req, queues = {}, schedules = [], opts = {}) {
   const dlqReplayMatch = sub.match(/^\/api\/dlq\/([^/]+)\/replay$/)
   if (dlqReplayMatch && method === 'POST') {
     const id = dlqReplayMatch[1]
+    let found = false
     for (const q of Object.values(queues)) {
-      try { await q._adapter.replayOne(id); break } catch (_) {}
+      try { if (await q._adapter.replayOne(id)) { found = true; break } } catch (_) {}
     }
+    if (!found) return _json({ error: 'Job not found in dead letter queue' }, 404)
     return _json({ ok: true })
   }
 

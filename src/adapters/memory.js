@@ -6,6 +6,17 @@ const { BaseAdapter, _PRIORITY } = require('./base')
 // In NODE_ENV=test: synchronous, does NOT auto-process (call Queue.flush() explicitly).
 // Jobs lost on process restart — not for production persistence.
 
+function _insertSorted(arr, job) {
+  let lo = 0, hi = arr.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    const m = arr[mid]
+    if (m.priority > job.priority || (m.priority === job.priority && m.scheduledAt <= job.scheduledAt)) lo = mid + 1
+    else hi = mid
+  }
+  arr.splice(lo, 0, job)
+}
+
 class MemoryAdapter extends BaseAdapter {
   constructor(opts = {}) {
     super(opts)
@@ -15,6 +26,7 @@ class MemoryAdapter extends BaseAdapter {
     this._failed = []
     this._dead = []
     this._locks = new Map()  // key → expiresAt
+    this._statusMap = new Map()  // id → status string for O(1) status lookups
     this._registry = null    // set by createQueue()
     this._testMode = process.env.NODE_ENV === 'test'
   }
@@ -23,8 +35,9 @@ class MemoryAdapter extends BaseAdapter {
     const id = crypto.randomUUID()
     const priority = _PRIORITY[opts.priority] ?? 5
     const scheduledAt = opts.at ? +opts.at : Date.now() + (opts.delayMs ?? 0)
-    this._pending.push({ id, name, args: args ?? [], priority, attempts: 0, maxAttempts: opts.maxAttempts ?? 3, scheduledAt })
-    this._pending.sort((a, b) => b.priority - a.priority || a.scheduledAt - b.scheduledAt)
+    const job = { id, name, args: args ?? [], priority, attempts: 0, maxAttempts: opts.maxAttempts ?? 3, scheduledAt }
+    _insertSorted(this._pending, job)
+    this._statusMap.set(id, 'pending')
     if (!this._testMode && this._registry) {
       setTimeout(() => this.tryProcess(this._registry), 0)
     }
@@ -37,6 +50,7 @@ class MemoryAdapter extends BaseAdapter {
     if (idx === -1) return null
     const [job] = this._pending.splice(idx, 1)
     this._inFlight.set(job.id, { name: job.name, args: job.args })
+    this._statusMap.set(job.id, 'running')
     return { ...job, startedAt: now }
   }
 
@@ -45,6 +59,7 @@ class MemoryAdapter extends BaseAdapter {
     this._inFlight.delete(id)
     this._completed.push({ id, name: job?.name, completedAt: Date.now() })
     if (this._completed.length > 1000) this._completed.splice(0, this._completed.length - 1000)
+    this._statusMap.set(id, 'completed')
   }
 
   async fail(id, error, attempts, maxAttempts) {
@@ -59,20 +74,19 @@ class MemoryAdapter extends BaseAdapter {
         failedAt: new Date().toISOString(),
       })
       if (this._dead.length > 1000) this._dead.splice(0, this._dead.length - 1000)
+      this._statusMap.set(id, 'failed')
     } else {
       // Re-schedule for retry with exponential backoff
-      const delay = 1000 * Math.pow(2, attempts - 1) + Math.random() * 500
+      const delay = 1000 * 2 ** (attempts - 1) + Math.random() * 500
       const retryJob = { ...(original ?? {}), id, attempts, scheduledAt: Date.now() + Math.round(delay) }
-      this._pending.push(retryJob)
-      this._pending.sort((a, b) => b.priority - a.priority || a.scheduledAt - b.scheduledAt)
+      _insertSorted(this._pending, retryJob)
+      this._statusMap.set(id, 'pending')
     }
   }
 
   async status(id) {
-    if (this._completed.some(j => j.id === id)) return { id, status: 'completed' }
-    if (this._dead.some(j => j.id === id)) return { id, status: 'failed' }
-    if (this._pending.some(j => j.id === id)) return { id, status: 'pending' }
-    return { id, status: 'unknown' }
+    const s = this._statusMap.get(id)
+    return s ? { id, status: s } : { id, status: 'unknown' }
   }
 
   async size() {
@@ -84,26 +98,30 @@ class MemoryAdapter extends BaseAdapter {
   }
 
   async replayDead() {
-    const jobs = this._dead.splice(0)
-    for (const job of jobs) {
-      if (this._registry?.[job.name]) {
-        await this.enqueue(job.name, job.args ?? [])
-      }
+    const toReplay = []
+    const toKeep = []
+    for (const job of this._dead) {
+      if (this._registry?.[job.name]) toReplay.push(job)
+      else toKeep.push(job)
     }
-    return jobs.length
+    this._dead = toKeep
+    for (const job of toReplay) await this.enqueue(job.name, job.args ?? [])
+    return toReplay.length
   }
 
   async cancel(id) {
     const idx = this._pending.findIndex(j => j.id === id)
     if (idx !== -1) this._pending.splice(idx, 1)
     this._inFlight.delete(id)
+    this._statusMap.set(id, 'cancelled')
   }
 
   async replayOne(id) {
     const idx = this._dead.findIndex(j => j.id === id)
-    if (idx === -1) return
+    if (idx === -1) return false
     const [job] = this._dead.splice(idx, 1)
     await this.enqueue(job.name, job.args ?? [])
+    return true
   }
 
   async acquireLock(key, ttlMs) {
@@ -148,6 +166,7 @@ class MemoryAdapter extends BaseAdapter {
     this._failed = []
     this._dead = []
     this._locks = new Map()
+    this._statusMap = new Map()
   }
 }
 

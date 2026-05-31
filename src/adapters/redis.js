@@ -92,15 +92,18 @@ class RedisAdapter extends BaseAdapter {
       await r.hset(this._metaPrefix + id, { status: 'failed', error, attempts, completedAt: Date.now() })
       await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, error, failedAt: new Date().toISOString() }))
     } else {
-      const delay = 1000 * Math.pow(2, attempts - 1) + Math.random() * 500
+      const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
       const existing = await r.hgetall(this._metaPrefix + id)
       if (existing?.name) {
         let args
         try { args = JSON.parse(existing.args ?? '[]') } catch (_) { args = [] }
         const payload = JSON.stringify({ id, name: existing.name, args, priority: +(existing.priority ?? 5), attempts, maxAttempts })
         await r.zadd(this._delayedKey, Date.now() + delay, payload)
+        await r.hset(this._metaPrefix + id, { status: 'pending', attempts, error })
+      } else {
+        // Metadata expired — push to DLQ rather than silently dropping the retry
+        await r.lpush(`arc:jobs:${this.name}:dlq`, JSON.stringify({ id, error, failedAt: new Date().toISOString() }))
       }
-      await r.hset(this._metaPrefix + id, { status: 'pending', attempts, error })
     }
   }
 
@@ -118,11 +121,12 @@ class RedisAdapter extends BaseAdapter {
       let job
       try { job = JSON.parse(item) } catch (_) { continue }
       if (job?.id === id) {
+        await this.enqueue(job.name, job.args ?? [])
         await r.lrem(dlqKey, 1, item)
-        if (this._registry?.[job.name]) await this.enqueue(job.name, job.args ?? [])
-        return
+        return true
       }
     }
+    return false
   }
 
   async status(id) {
@@ -147,15 +151,20 @@ class RedisAdapter extends BaseAdapter {
     const r = await this._getClient()
     const key = `arc:jobs:${this.name}:dlq`
     const items = await r.lrange(key, 0, -1)
-    await r.del(key)
+    let count = 0
     for (const item of items) {
       let job
-      try { job = JSON.parse(item) } catch (_) { continue }
-      if (job?.name && this._registry?.[job.name]) {
+      try { job = JSON.parse(item) } catch (_) {
+        await r.lrem(key, 1, item)
+        continue
+      }
+      if (job?.name) {
         await this.enqueue(job.name, job.args ?? [])
+        await r.lrem(key, 1, item)
+        count++
       }
     }
-    return items.length
+    return count
   }
 
   // @unique locks via SET NX PX — exact celery-once semantics, atomic

@@ -45,20 +45,27 @@ class SqliteAdapter extends BaseAdapter {
     }
   }
 
+  _stmt(sql) {
+    if (!this._stmtMap) this._stmtMap = new Map()
+    let s = this._stmtMap.get(sql)
+    if (!s) { s = this._db.prepare(sql); this._stmtMap.set(sql, s) }
+    return s
+  }
+
   _run(sql, ...params) {
     // Bun:sqlite uses .run(), better-sqlite3 uses .prepare().run()
     if (this._db.run) return this._db.run(sql, ...params)
-    return this._db.prepare(sql).run(...params)
+    return this._stmt(sql).run(...params)
   }
 
   _get(sql, ...params) {
     if (this._db.query) return this._db.query(sql).get(...params)
-    return this._db.prepare(sql).get(...params)
+    return this._stmt(sql).get(...params)
   }
 
   _all(sql, ...params) {
     if (this._db.query) return this._db.query(sql).all(...params)
-    return this._db.prepare(sql).all(...params)
+    return this._stmt(sql).all(...params)
   }
 
   async enqueue(name, args, opts = {}) {
@@ -138,7 +145,7 @@ class SqliteAdapter extends BaseAdapter {
         id, error, attempts, Date.now()
       )
     } else {
-      const delay = 1000 * Math.pow(2, attempts - 1) + Math.random() * 500
+      const delay = Math.round(1000 * 2 ** (attempts - 1) + Math.random() * 500)
       this._run(
         `UPDATE _arc_jobs SET status = 'pending', attempts = ?2, scheduled_at = ?3, error = ?4
          WHERE id = ?1`,
@@ -159,11 +166,13 @@ class SqliteAdapter extends BaseAdapter {
   }
 
   async replayOne(id) {
-    this._run(
+    const result = this._run(
       `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE id = ?1 AND status = 'failed'`,
       id, Date.now()
     )
-    if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+    const changed = result?.changes ?? result
+    if (changed && this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
+    return !!changed
   }
 
   async status(id) {
@@ -181,15 +190,14 @@ class SqliteAdapter extends BaseAdapter {
   }
 
   async replayDead() {
-    const jobs = await this.dead()
-    for (const job of jobs) {
-      this._run(
-        `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE id = ?1`,
-        job.id, Date.now()
-      )
-    }
+    const count = this._get(`SELECT COUNT(*) as c FROM _arc_jobs WHERE queue = ?1 AND status = 'failed'`, this._queueName)?.c ?? 0
+    if (count === 0) return 0
+    this._run(
+      `UPDATE _arc_jobs SET status = 'pending', attempts = 0, error = NULL, scheduled_at = ?2 WHERE queue = ?1 AND status = 'failed'`,
+      this._queueName, Date.now()
+    )
     if (this._registry) setTimeout(() => this.tryProcess(this._registry), 0)
-    return jobs.length
+    return count
   }
 
   async acquireLock(key, ttlMs) {

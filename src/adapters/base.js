@@ -49,7 +49,9 @@ class BaseAdapter {
         entry.fn(...(job.args ?? [])),
         new Promise((_, rej) => setTimeout(() => rej(new Error(`job timed out after ${timeoutMs}ms`)), timeoutMs)),
       ])
-      await this.complete(job.id)
+      try { await this.complete(job.id) } catch (storErr) {
+        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'complete_storage_error', error: storErr?.message ?? String(storErr) }))
+      }
       if (entry.thenJob && registry[entry.thenJob]) {
         try {
           await this.enqueue(entry.thenJob, job.args ?? [])
@@ -61,9 +63,11 @@ class BaseAdapter {
     } catch (e) {
       const attempts = (job.attempts ?? 0) + 1
       const maxAttempts = entry.maxRetries ?? job.maxAttempts ?? 3
-      await this.fail(job.id, e?.message ?? String(e), attempts, maxAttempts)
+      try { await this.fail(job.id, e?.message ?? String(e), attempts, maxAttempts) } catch (storErr) {
+        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'fail_storage_error', error: storErr?.message ?? String(storErr) }))
+      }
       if (attempts < maxAttempts) {
-        const backoff = (entry.backoffMs ?? 1000) * Math.pow(2, attempts - 1) + Math.random() * 500
+        const backoff = (entry.backoffMs ?? 1000) * 2 ** (attempts - 1) + Math.random() * 500
         console.warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', queue: this.name, job: job.name, event: 'retry', attempt: attempts, backoffMs: Math.round(backoff) }))
       } else {
         console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, job: job.name, event: 'dlq', error: e?.message ?? String(e) }))
@@ -73,12 +77,16 @@ class BaseAdapter {
 
   async tryProcess(registry) {
     while (this._running < this._concurrency) {
-      const job = await this.dequeue()
+      let job
+      try { job = await this.dequeue() } catch (e) {
+        console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', queue: this.name, event: 'dequeue_error', error: e?.message ?? String(e) }))
+        break
+      }
       if (!job) break
       this._running++
       this._runJob(job, registry).finally(() => {
         this._running--
-        setImmediate(() => this.tryProcess(registry))
+        if (this._running < this._concurrency) setImmediate(() => this.tryProcess(registry))
         this._maybeDrain()
       })
     }
