@@ -9,3 +9,4 @@ dist/
 !.env.example
 .optimizer-cache/
 .cleanproof-cache/
+.testproof-cache/

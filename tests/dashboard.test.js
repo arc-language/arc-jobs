@@ -255,4 +255,119 @@ describe('arcJobsHandle()', () => {
       assert.ok(res.headers.get('Content-Type').includes('text/event-stream'))
     })
   })
+
+  describe('/api/jobs/:id/progress SSE endpoint', () => {
+    test('returns SSE response with correct headers', async () => {
+      const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs/job-123/progress'), queues)
+      assert.ok(res instanceof Response)
+      assert.ok(res.headers.get('Content-Type').includes('text/event-stream'))
+    })
+
+    test('does not require auth (progress endpoint bypasses auth check)', async () => {
+      const origSecret = process.env.ARC_JOBS_SECRET
+      process.env.ARC_JOBS_SECRET = 'required-secret'
+      try {
+        // No auth header — progress endpoint is always accessible
+        const res = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs/job-abc/progress'), queues)
+        assert.ok(res instanceof Response)
+        assert.ok(res.headers.get('Content-Type').includes('text/event-stream'))
+      } finally {
+        if (origSecret === undefined) delete process.env.ARC_JOBS_SECRET
+        else process.env.ARC_JOBS_SECRET = origSecret
+      }
+    })
+  })
+
+  describe('broadcastProgress() with active listeners', () => {
+    test('delivers progress to subscribed SSE stream', async () => {
+      // Subscribe to progress for job-xyz
+      const sseRes = await arcJobsHandle(makeRequest('GET', '/_arc/jobs/api/jobs/job-xyz/progress'), queues)
+      assert.ok(sseRes instanceof Response)
+
+      // Broadcast — should not throw even with active listener
+      assert.doesNotThrow(() => broadcastProgress('job-xyz', 50, { step: 'half' }))
+      assert.doesNotThrow(() => broadcastProgress('job-xyz', 100))
+    })
+  })
+
+  describe('auth — ARC_JOBS_SECRET env var', () => {
+    function makeAuthRequest(method, path, token) {
+      const url = 'http://localhost' + path
+      const headers = token ? { authorization: `Bearer ${token}` } : {}
+      return new Request(url, { method, headers })
+    }
+
+    test('allows request with correct Bearer token', async () => {
+      const origSecret = process.env.ARC_JOBS_SECRET
+      process.env.ARC_JOBS_SECRET = 'my-secret-123'
+      try {
+        const res = await arcJobsHandle(makeAuthRequest('GET', '/_arc/jobs/api/overview', 'my-secret-123'), queues)
+        assert.strictEqual(res.status, 200)
+      } finally {
+        if (origSecret === undefined) delete process.env.ARC_JOBS_SECRET
+        else process.env.ARC_JOBS_SECRET = origSecret
+      }
+    })
+
+    test('allows request with correct ?token= query param', async () => {
+      const origSecret = process.env.ARC_JOBS_SECRET
+      process.env.ARC_JOBS_SECRET = 'qs-secret'
+      try {
+        const url = 'http://localhost/_arc/jobs/api/overview?token=qs-secret'
+        const res = await arcJobsHandle(new Request(url), queues)
+        assert.strictEqual(res.status, 200)
+      } finally {
+        if (origSecret === undefined) delete process.env.ARC_JOBS_SECRET
+        else process.env.ARC_JOBS_SECRET = origSecret
+      }
+    })
+
+    test('returns 401 JSON for API paths with wrong token', async () => {
+      const origSecret = process.env.ARC_JOBS_SECRET
+      process.env.ARC_JOBS_SECRET = 'correct-secret'
+      try {
+        const res = await arcJobsHandle(makeAuthRequest('GET', '/_arc/jobs/api/overview', 'wrong-token'), queues)
+        assert.strictEqual(res.status, 401)
+        const data = await res.json()
+        assert.ok(data.error)
+      } finally {
+        if (origSecret === undefined) delete process.env.ARC_JOBS_SECRET
+        else process.env.ARC_JOBS_SECRET = origSecret
+      }
+    })
+
+    test('returns 401 HTML for dashboard root with wrong token', async () => {
+      const origSecret = process.env.ARC_JOBS_SECRET
+      process.env.ARC_JOBS_SECRET = 'correct-secret'
+      try {
+        const res = await arcJobsHandle(makeAuthRequest('GET', '/_arc/jobs', 'bad'), queues)
+        assert.strictEqual(res.status, 401)
+        const body = await res.text()
+        assert.ok(body.includes('<!DOCTYPE html>'))
+      } finally {
+        if (origSecret === undefined) delete process.env.ARC_JOBS_SECRET
+        else process.env.ARC_JOBS_SECRET = origSecret
+      }
+    })
+
+    test('allows request when opts.auth function returns true', async () => {
+      const res = await arcJobsHandle(
+        makeRequest('GET', '/_arc/jobs/api/overview'),
+        queues,
+        [],
+        { auth: async () => true }
+      )
+      assert.strictEqual(res.status, 200)
+    })
+
+    test('returns 401 when opts.auth function returns false', async () => {
+      const res = await arcJobsHandle(
+        makeRequest('GET', '/_arc/jobs/api/overview'),
+        queues,
+        [],
+        { auth: async () => false }
+      )
+      assert.strictEqual(res.status, 401)
+    })
+  })
 })

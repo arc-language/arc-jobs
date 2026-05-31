@@ -160,6 +160,141 @@ describe('SqliteAdapter', () => {
       assert.strictEqual(ok, true)
     })
   })
+
+  describe('cancel', () => {
+    test('cancel prevents a pending job from being dequeued', async () => {
+      const id = await adapter.enqueue('CancelJob', [])
+      await adapter.cancel(id)
+      const job = await adapter.dequeue()
+      assert.strictEqual(job, null)
+    })
+
+    test('cancel on running job sets status to cancelled', async () => {
+      const id = await adapter.enqueue('CancelJob', [])
+      await adapter.dequeue()  // move to running
+      await adapter.cancel(id)
+      const s = await adapter.status(id)
+      assert.strictEqual(s.status, 'cancelled')
+    })
+  })
+
+  describe('replayOne', () => {
+    test('replayOne re-enqueues a failed job and returns true', async () => {
+      const id = await adapter.enqueue('FailJob', [])
+      await adapter.dequeue()
+      await adapter.fail(id, 'err', 3, 3)
+      const found = await adapter.replayOne(id)
+      assert.strictEqual(found, true)
+      assert.strictEqual(await adapter.size(), 1)
+    })
+
+    test('replayOne returns false for unknown or non-failed id', async () => {
+      const found = await adapter.replayOne('no-such-id')
+      assert.strictEqual(found, false)
+    })
+
+    test('replayOne does not replay a pending (non-failed) job', async () => {
+      const id = await adapter.enqueue('ActiveJob', [])
+      const found = await adapter.replayOne(id)
+      assert.strictEqual(found, false)
+      assert.strictEqual(await adapter.size(), 1)  // still pending
+    })
+  })
+
+  describe('stats', () => {
+    test('stats returns zeroes for empty queue', async () => {
+      const s = await adapter.stats()
+      assert.deepStrictEqual(s, { pending: 0, running: 0, completed: 0, failed: 0 })
+    })
+
+    test('stats counts pending jobs', async () => {
+      await adapter.enqueue('A', [])
+      await adapter.enqueue('B', [])
+      const s = await adapter.stats()
+      assert.strictEqual(s.pending, 2)
+    })
+
+    test('stats counts running jobs', async () => {
+      await adapter.enqueue('A', [])
+      await adapter.dequeue()  // now running
+      const s = await adapter.stats()
+      assert.strictEqual(s.running, 1)
+      assert.strictEqual(s.pending, 0)
+    })
+
+    test('stats counts completed jobs', async () => {
+      const id = await adapter.enqueue('A', [])
+      await adapter.dequeue()
+      await adapter.complete(id)
+      const s = await adapter.stats()
+      assert.strictEqual(s.completed, 1)
+    })
+
+    test('stats counts failed jobs', async () => {
+      const id = await adapter.enqueue('A', [])
+      await adapter.dequeue()
+      await adapter.fail(id, 'boom', 3, 3)
+      const s = await adapter.stats()
+      assert.strictEqual(s.failed, 1)
+    })
+  })
+
+  describe('listActive', () => {
+    test('listActive returns empty array when no pending or running jobs', async () => {
+      const jobs = await adapter.listActive()
+      assert.deepStrictEqual(jobs, [])
+    })
+
+    test('listActive includes pending jobs', async () => {
+      await adapter.enqueue('PendingJob', [42])
+      const jobs = await adapter.listActive()
+      assert.strictEqual(jobs.length, 1)
+      assert.strictEqual(jobs[0].name, 'PendingJob')
+      assert.strictEqual(jobs[0].status, 'pending')
+    })
+
+    test('listActive includes running jobs', async () => {
+      await adapter.enqueue('RunningJob', [])
+      await adapter.dequeue()
+      const jobs = await adapter.listActive()
+      assert.strictEqual(jobs.length, 1)
+      assert.strictEqual(jobs[0].status, 'running')
+    })
+
+    test('listActive parses args JSON', async () => {
+      await adapter.enqueue('Job', [1, 'hello', true])
+      const jobs = await adapter.listActive()
+      assert.deepStrictEqual(jobs[0].args, [1, 'hello', true])
+    })
+  })
+
+  describe('listLocks', () => {
+    test('listLocks returns empty array when no active locks', async () => {
+      const locks = await adapter.listLocks()
+      assert.deepStrictEqual(locks, [])
+    })
+
+    test('listLocks returns active idempotency locks', async () => {
+      await adapter.enqueue('Invoice', [1], { idempotencyKey: 'inv-1' })
+      const locks = await adapter.listLocks()
+      assert.strictEqual(locks.length, 1)
+      assert.strictEqual(locks[0].key, 'inv-1')
+      assert.ok(locks[0].expiresAt > Date.now())
+    })
+  })
+
+  describe('stopPoller', () => {
+    test('stopPoller clears the interval', () => {
+      adapter.startPoller({}, 100)
+      assert.ok(adapter._pollTimer !== null)
+      adapter.stopPoller()
+      assert.strictEqual(adapter._pollTimer, null)
+    })
+
+    test('stopPoller is safe to call when not running', () => {
+      assert.doesNotThrow(() => adapter.stopPoller())
+    })
+  })
 })
 
 describe('SqliteAdapter via createQueue()', () => {

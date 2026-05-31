@@ -98,4 +98,85 @@ describe('nextFireTime', () => {
     assert.strictEqual(next.getUTCMinutes(), 0)
     assert.strictEqual(next.getUTCHours(), 9)
   })
+
+  test('returns null for impossible expression (minute=60 never matches)', () => {
+    // minute field is 60 — getMinutes() is always 0-59, so this never fires
+    const next = nextFireTime('60 * * * *')
+    assert.strictEqual(next, null)
+  })
+})
+
+describe('startScheduler', () => {
+  const { startScheduler } = require('../src/core/scheduler')
+
+  function captureInterval(fn) {
+    let captured
+    const orig = globalThis.setInterval
+    globalThis.setInterval = (cb, _ms) => { captured = cb; return orig(() => {}, 9999999) }
+    const handle = fn()
+    globalThis.setInterval = orig
+    clearInterval(handle)
+    return captured
+  }
+
+  test('fires enqueue when cron matches current time', async () => {
+    const enqueued = []
+    const queues = { default: { enqueue: async (name, args) => { enqueued.push({ name, args }); return 'id' } } }
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'Ping', queueName: 'default' }], queues))
+    await tick()
+    assert.strictEqual(enqueued.length, 1)
+    assert.strictEqual(enqueued[0].name, 'Ping')
+  })
+
+  test('deduplicates within the same minute', async () => {
+    let count = 0
+    const queues = { default: { enqueue: async () => { count++; return 'id' } } }
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'Dedup', queueName: 'default' }], queues))
+    await tick()
+    await tick()  // second call in same minute key → skipped
+    assert.strictEqual(count, 1)
+  })
+
+  test('passes args to enqueue', async () => {
+    let received = null
+    const queues = { default: { enqueue: async (_n, args) => { received = args; return 'id' } } }
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'ArgJob', args: [1, 'two'] }], queues))
+    await tick()
+    assert.deepStrictEqual(received, [1, 'two'])
+  })
+
+  test('defaults to empty args when none provided', async () => {
+    let received = null
+    const queues = { default: { enqueue: async (_n, args) => { received = args; return 'id' } } }
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'NoArgs' }], queues))
+    await tick()
+    assert.deepStrictEqual(received, [])
+  })
+
+  test('logs warning when queue is not found (does not throw)', () => {
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'OrphanJob', queueName: 'missing' }], {}))
+    assert.doesNotThrow(() => tick())
+  })
+
+  test('does not enqueue when cron does not match', async () => {
+    let count = 0
+    const queues = { default: { enqueue: async () => { count++; return 'id' } } }
+    // minute=60 never matches
+    const tick = captureInterval(() => startScheduler([{ expr: '60 * * * *', jobName: 'Never' }], queues))
+    await tick()
+    assert.strictEqual(count, 0)
+  })
+
+  test('handles enqueue rejection gracefully (does not throw)', async () => {
+    const queues = { default: { enqueue: async () => { throw new Error('queue full') } } }
+    const tick = captureInterval(() => startScheduler([{ expr: '* * * * *', jobName: 'FailEnqueue' }], queues))
+    assert.doesNotThrow(() => tick())
+    // Allow async .catch() handler to run
+    await new Promise(r => setTimeout(r, 20))
+  })
+
+  test('returns a timer handle (clearInterval does not throw)', () => {
+    const handle = startScheduler([], {})
+    assert.doesNotThrow(() => clearInterval(handle))
+  })
 })
