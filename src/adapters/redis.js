@@ -158,10 +158,12 @@ class RedisAdapter extends BaseAdapter {
   async replayDead() {
     const r = await this._getClient()
     const key = `arc:jobs:${this.name}:dlq`
-    const items = await r.lrange(key, 0, -1)
-    if (!items?.length) return 0
-    // DEL first to avoid O(k²) per-item LREM scans; enqueue survivors after
-    await r.del(key)
+    // RENAME atomically grabs the list — concurrent fail() pushes after this point land on the
+    // original key and are not lost; this tmp key is ours alone to drain.
+    const tmpKey = `${key}:replay:${Date.now()}`
+    try { await r.rename(key, tmpKey) } catch (_) { return 0 }  // key didn't exist
+    const items = await r.lrange(tmpKey, 0, -1)
+    await r.del(tmpKey)
     let count = 0
     for (const item of items) {
       let job
